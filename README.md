@@ -84,6 +84,7 @@ different workspace than the one you're logged into; re-run `setup.py` after swi
 | `poc/embed_token.py` | option 2 token exchange |
 | `poc/api.py` | API + serves the pages |
 | `static/index.html`, `static/external.html` | option 1 and option 2 front ends |
+| `docs/embed-flows.html` | diagrams: token/user flow and parameter flows (open in a browser) |
 
 ## Cleaning up a workspace
 

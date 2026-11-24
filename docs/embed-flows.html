@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>External Embed Flows</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+  /* Layout: one reading column of figures, each figure scrolls sideways on its own at phone width */
+  :root {
+    --bg: #f7f8fa; --panel: #ffffff; --fg: #17202b; --muted: #5d6877; --line: #c9d0da; --zone: #eef1f5;
+    --lock: #c0264b; --live: #0e7a6f;
+    --display: "Space Grotesk", "Inter", system-ui, sans-serif;
+    --body: "Inter", system-ui, -apple-system, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+    --bg: #11161d; --panel: #18202a; --fg: #e5eaf1; --muted: #98a3b3; --line: #3a4554; --zone: #1b2430;
+    --lock: #fb7194; --live: #3fd1bf; color-scheme: dark } }
+  :root[data-theme="dark"] {
+    --bg: #11161d; --panel: #18202a; --fg: #e5eaf1; --muted: #98a3b3; --line: #3a4554; --zone: #1b2430;
+    --lock: #fb7194; --live: #3fd1bf; color-scheme: dark }
+
+  body { background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.55; }
+  .wrap { max-width: 1060px; margin: 0 auto; padding-block: 40px 64px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+    display: grid; gap: 44px; }
+  header { display: grid; gap: 8px; max-width: 68ch; }
+  h1 { font-family: var(--display); font-size: 30px; line-height: 1.15; margin: 0; text-wrap: balance; }
+  h2 { font-family: var(--display); font-size: 20px; margin: 0; text-wrap: balance; }
+  h3 { font-family: var(--display); font-size: 15px; margin: 0; text-wrap: balance; }
+  p { margin: 0; color: var(--muted); max-width: 68ch; }
+  code { font-family: var(--mono); font-size: .88em; color: var(--fg); }
+  section { display: grid; gap: 14px; }
+  .keys { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; color: var(--muted); }
+  .keys span { display: inline-flex; align-items: center; gap: 8px; }
+  .sw { width: 22px; height: 0; border-top: 2.5px solid; display: inline-block; }
+  .sw.lock { border-color: var(--lock); } .sw.live { border-color: var(--live); } .sw.ret { border-color: var(--muted); border-top-style: dashed; }
+
+  figure { margin: 0; display: grid; gap: 10px; min-width: 0; }
+  .scroll { overflow-x: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  svg { display: block; width: 100%; min-width: 760px; height: auto; color: var(--fg); }
+  figcaption { font-size: 13px; color: var(--muted); max-width: 80ch; }
+
+  /* SVG styling via page CSS (no <style> inside the SVGs) */
+  .zone { fill: var(--zone); stroke: none; }
+  .zlabel { font: 600 11px var(--body); letter-spacing: .08em; text-transform: uppercase; fill: var(--muted); }
+  .head { fill: var(--panel); stroke: var(--line); stroke-width: 1.2; }
+  .hT { font: 600 13px var(--display); fill: var(--fg); }
+  .hS { font: 400 11px var(--mono); fill: var(--muted); }
+  .life { stroke: var(--line); stroke-width: 1.2; stroke-dasharray: 4 5; }
+  .msg { stroke: var(--fg); stroke-width: 1.4; fill: none; }
+  .msg.ret { stroke: var(--muted); stroke-dasharray: 6 4; }
+  .msg.lock { stroke: var(--lock); stroke-width: 2; }
+  .msg.live { stroke: var(--live); stroke-width: 2; }
+  .lbl { font: 500 12px var(--body); fill: var(--fg); paint-order: stroke; stroke: var(--panel); stroke-width: 5px; stroke-linejoin: round; }
+  .lbl.m { font: 400 11.5px var(--mono); }
+  .lbl.dim { fill: var(--muted); }
+  .lbl.lock { fill: var(--lock); } .lbl.live { fill: var(--live); }
+  .ah { fill: var(--fg); } .ah.ret { fill: var(--muted); } .ah.lock { fill: var(--lock); } .ah.live { fill: var(--live); }
+  .box { fill: var(--panel); stroke: var(--line); stroke-width: 1.2; }
+  .box.lock { stroke: var(--lock); stroke-width: 1.6; }
+  .box.live { stroke: var(--live); stroke-width: 1.6; }
+  .bT { font: 600 13.5px var(--display); fill: var(--fg); }
+  .bS { font: 400 11.5px var(--mono); fill: var(--muted); }
+  .bS.lock { fill: var(--lock); }
+
+  .split { display: grid; gap: 28px; }
+  @media (prefers-reduced-motion: no-preference) { .scroll { scroll-behavior: smooth; } }
+</style>
+<style>body{margin:0}</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <h1>Embedding for external users</h1>
+    <p>How the POC in <code>poc-dashboard</code> lets a viewer with no Databricks account see a dashboard, and how parameters move between your app, the dashboard and Databricks.</p>
+  </header>
+
+  <!-- ───────────── Diagram 1: users and tokens ───────────── -->
+  <section>
+    <h2>1. Users and tokens</h2>
+    <div class="keys">
+      <span><i class="sw"></i>request</span>
+      <span><i class="sw ret"></i>response</span>
+      <span><i class="sw lock"></i>the token the browser receives</span>
+    </div>
+    <figure>
+      <div class="scroll">
+        <svg viewBox="0 0 1000 700" role="img" aria-label="Sequence diagram: the viewer signs into your app; your backend uses the service principal secret to get a broad token, asks the tokeninfo API for viewer-specific details, exchanges them for a scoped one-hour token, and hands only that token to the browser, which renders the dashboard with it.">
+          <defs>
+            <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="a1r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah ret" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="a1l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="ah lock" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+
+          <!-- trust zones -->
+          <rect class="zone" x="205" y="8" width="190" height="684" rx="10"/>
+          <rect class="zone" x="440" y="8" width="552" height="684" rx="10"/>
+          <text class="zlabel" x="300" y="682" text-anchor="middle">Your servers</text>
+          <text class="zlabel" x="716" y="682" text-anchor="middle">Databricks workspace</text>
+          <text class="zlabel" x="90" y="682" text-anchor="middle">Public internet</text>
+
+          <!-- lifelines -->
+          <line class="life" x1="90"  y1="66" x2="90"  y2="660"/>
+          <line class="life" x1="300" y1="66" x2="300" y2="660"/>
+          <line class="life" x1="540" y1="66" x2="540" y2="660"/>
+          <line class="life" x1="740" y1="66" x2="740" y2="660"/>
+          <line class="life" x1="900" y1="66" x2="900" y2="660"/>
+
+          <!-- participants -->
+          <rect class="head" x="12"  y="20" width="156" height="46" rx="8"/>
+          <text class="hT" x="90" y="40" text-anchor="middle">Viewer's browser</text>
+          <text class="hS" x="90" y="56" text-anchor="middle">no Databricks account</text>
+
+          <rect class="head" x="220" y="20" width="160" height="46" rx="8"/>
+          <text class="hT" x="300" y="40" text-anchor="middle">Your backend</text>
+          <text class="hS" x="300" y="56" text-anchor="middle">holds SP secret (.env)</text>
+
+          <rect class="head" x="460" y="20" width="160" height="46" rx="8"/>
+          <text class="hT" x="540" y="40" text-anchor="middle">Databricks OAuth</text>
+          <text class="hS" x="540" y="56" text-anchor="middle">/oidc/v1/token</text>
+
+          <rect class="head" x="660" y="20" width="160" height="46" rx="8"/>
+          <text class="hT" x="740" y="40" text-anchor="middle">Lakeview API</text>
+          <text class="hS" x="740" y="56" text-anchor="middle">…/published/tokeninfo</text>
+
+          <rect class="head" x="828" y="20" width="152" height="46" rx="8"/>
+          <text class="hT" x="904" y="40" text-anchor="middle">Dashboard</text>
+          <text class="hS" x="904" y="56" text-anchor="middle">+ SQL warehouse</text>
+
+          <!-- 1 -->
+          <line class="msg" x1="90" y1="100" x2="300" y2="100" marker-end="url(#a1)"/>
+          <text class="lbl" x="195" y="93" text-anchor="middle">1  sign in with your own login</text>
+          <!-- 2 -->
+          <line class="msg" x1="90" y1="140" x2="300" y2="140" marker-end="url(#a1)"/>
+          <text class="lbl m" x="195" y="133" text-anchor="middle">2  POST /api/external/token</text>
+          <!-- 3 self -->
+          <path class="msg" d="M300,170 H326 V194 H302" marker-end="url(#a1)"/>
+          <text class="lbl" x="334" y="187">3  bob → ZIP 10003</text>
+          <!-- 4 -->
+          <line class="msg" x1="300" y1="234" x2="540" y2="234" marker-end="url(#a1)"/>
+          <text class="lbl" x="420" y="227" text-anchor="middle">4  SP id + secret, all-apis</text>
+          <!-- 5 -->
+          <line class="msg ret" x1="540" y1="272" x2="300" y2="272" marker-end="url(#a1r)"/>
+          <text class="lbl dim" x="420" y="265" text-anchor="middle">5  broad SP token</text>
+          <!-- 6 -->
+          <line class="msg" x1="300" y1="314" x2="740" y2="314" marker-end="url(#a1)"/>
+          <text class="lbl m" x="520" y="307" text-anchor="middle">6  tokeninfo?external_viewer_id=poc-bob&amp;external_value=10003</text>
+          <!-- 7 -->
+          <line class="msg ret" x1="740" y1="352" x2="300" y2="352" marker-end="url(#a1r)"/>
+          <text class="lbl dim" x="520" y="345" text-anchor="middle">7  authorization_details + custom claim</text>
+          <!-- 8 -->
+          <line class="msg" x1="300" y1="394" x2="540" y2="394" marker-end="url(#a1)"/>
+          <text class="lbl" x="420" y="387" text-anchor="middle">8  SP + authorization_details</text>
+          <!-- 9 -->
+          <line class="msg lock" x1="540" y1="432" x2="300" y2="432" marker-end="url(#a1l)"/>
+          <text class="lbl lock" x="420" y="425" text-anchor="middle">9  scoped token · 1 h</text>
+          <!-- 10 -->
+          <line class="msg lock" x1="300" y1="472" x2="90" y2="472" marker-end="url(#a1l)"/>
+          <text class="lbl lock" x="195" y="465" text-anchor="middle">10  scoped token only</text>
+          <!-- 11 -->
+          <line class="msg lock" x1="90" y1="520" x2="900" y2="520" marker-end="url(#a1l)"/>
+          <text class="lbl m" x="495" y="513" text-anchor="middle">11  new DatabricksDashboard({ token }).initialize()</text>
+          <!-- 12 self -->
+          <path class="msg" d="M900,546 H926 V570 H902" marker-end="url(#a1)"/>
+          <text class="lbl m" x="884" y="563" text-anchor="end">12  SQL runs with __aibi_external_value = 10003</text>
+          <!-- 13 -->
+          <line class="msg ret" x1="900" y1="604" x2="90" y2="604" marker-end="url(#a1r)"/>
+          <text class="lbl dim" x="495" y="597" text-anchor="middle">13  rendered dashboard, ZIP 10003 rows only</text>
+          <!-- 14 -->
+          <line class="msg ret" x1="90" y1="644" x2="300" y2="644" marker-end="url(#a1r)"/>
+          <text class="lbl dim" x="195" y="637" text-anchor="middle">14  before expiry: getNewToken()</text>
+        </svg>
+      </div>
+      <figcaption>The service principal secret stays in your backend (steps 4 and 8). The browser only ever holds the scoped token from step 9: it lasts one hour, works for this one dashboard, and has bob's ZIP built in. Step 14 repeats steps 2 to 10 so long sessions keep working. Who "bob" is comes from your own login in step 1, so you decide how users authenticate.</figcaption>
+    </figure>
+  </section>
+
+  <!-- ───────────── Diagram 2: parameters ───────────── -->
+  <section>
+    <h2>2. Parameters</h2>
+    <p>There are two kinds of parameter, and they travel different routes. A <strong style="color:var(--lock)">locked</strong> parameter is decided by your server and signed into the token. An <strong style="color:var(--live)">interactive</strong> parameter is a normal dashboard filter that your page and the dashboard keep in sync.</p>
+
+    <div class="split">
+      <figure>
+        <h3>2a. Locked parameter: pickup ZIP</h3>
+        <div class="scroll">
+          <svg viewBox="0 0 1000 150" role="img" aria-label="The viewer's identity goes to your backend, which maps it to ZIP 10003, signs it into the token as external_value, and the dashboard SQL reads it as __aibi_external_value.">
+            <defs>
+              <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah lock" d="M0,0 L10,5 L0,10 z"/></marker>
+            </defs>
+            <rect class="box" x="10" y="30" width="185" height="86" rx="10"/>
+            <text class="bT" x="26" y="58">Your login</text>
+            <text class="bS" x="26" y="80">user_id = bob</text>
+            <text class="bS" x="26" y="98">no ZIP sent</text>
+
+            <rect class="box" x="275" y="30" width="185" height="86" rx="10"/>
+            <text class="bT" x="291" y="58">Your backend</text>
+            <text class="bS" x="291" y="80">USERS["bob"]</text>
+            <text class="bS lock" x="291" y="98">→ 10003</text>
+
+            <rect class="box lock" x="540" y="30" width="185" height="86" rx="10"/>
+            <text class="bT" x="556" y="58">Scoped token</text>
+            <text class="bS" x="556" y="80">external_value</text>
+            <text class="bS lock" x="556" y="98">= "10003" (signed)</text>
+
+            <rect class="box" x="805" y="30" width="185" height="86" rx="10"/>
+            <text class="bT" x="821" y="58">Dashboard SQL</text>
+            <text class="bS" x="821" y="80">WHERE pickup_zip =</text>
+            <text class="bS lock" x="821" y="98">__aibi_external_value</text>
+
+            <line class="msg lock" x1="195" y1="73" x2="273" y2="73" marker-end="url(#a2)"/>
+            <text class="lbl m" x="235" y="64" text-anchor="middle">/token</text>
+            <line class="msg lock" x1="460" y1="73" x2="538" y2="73" marker-end="url(#a2)"/>
+            <text class="lbl m" x="500" y="64" text-anchor="middle">step 6</text>
+            <line class="msg lock" x1="725" y1="73" x2="803" y2="73" marker-end="url(#a2)"/>
+            <text class="lbl m" x="765" y="64" text-anchor="middle">step 12</text>
+            <text class="lbl dim" x="500" y="140" text-anchor="middle">The viewer can't change it: editing the URL or a filter does not touch the token.</text>
+          </svg>
+        </div>
+        <figcaption>Use this route for anything that decides which data a user may see: tenant, region, customer id. <code>external_value</code> and <code>external_viewer_id</code> together must stay under 1 KB, so for several values pack them as JSON and read them with <code>get_json_object</code>.</figcaption>
+      </figure>
+
+      <figure>
+        <h3>2b. Interactive parameter: minimum fare</h3>
+        <div class="scroll">
+          <svg viewBox="0 0 1000 390" role="img" aria-label="Your page sets the dashboard's min fare filter with setFilters; the dashboard re-queries and reports the change back with onFiltersChanged; your page posts it to your backend, which writes to Delta tables, runs the same SQL and returns totals to the page.">
+            <defs>
+              <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah live" d="M0,0 L10,5 L0,10 z"/></marker>
+              <marker id="a3r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah ret" d="M0,0 L10,5 L0,10 z"/></marker>
+            </defs>
+
+            <rect class="box live" x="30" y="30" width="300" height="110" rx="10"/>
+            <text class="bT" x="48" y="60">Your page (browser)</text>
+            <text class="bS" x="48" y="84">min fare input · KPI panel</text>
+            <text class="bS" x="48" y="104">@databricks/aibi-client</text>
+
+            <rect class="box live" x="670" y="30" width="300" height="110" rx="10"/>
+            <text class="bT" x="688" y="60">Embedded dashboard</text>
+            <text class="bS" x="688" y="84">filter poc~fare_filter</text>
+            <text class="bS" x="688" y="104">→ dataset param :min_fare</text>
+
+            <rect class="box" x="30" y="250" width="300" height="110" rx="10"/>
+            <text class="bT" x="48" y="280">Your backend</text>
+            <text class="bS" x="48" y="304">record_and_query()</text>
+            <text class="bS" x="48" y="324">poc/api.py</text>
+
+            <rect class="box" x="670" y="250" width="300" height="110" rx="10"/>
+            <text class="bT" x="688" y="280">SQL warehouse + Delta</text>
+            <text class="bS" x="688" y="304">poc_dashboard.app_params</text>
+            <text class="bS" x="688" y="324">poc_dashboard.app_results</text>
+
+            <!-- 1 app -> dashboard -->
+            <line class="msg live" x1="330" y1="68" x2="668" y2="68" marker-end="url(#a3)"/>
+            <text class="lbl m live" x="500" y="60" text-anchor="middle">1  setFilters(fare_filter = "15")</text>
+            <!-- 2 dashboard re-queries -->
+            <line class="msg" x1="820" y1="140" x2="820" y2="248" marker-end="url(#a3r)" style="stroke:var(--muted)"/>
+            <text class="lbl" x="810" y="190" text-anchor="end">2  re-query with :min_fare</text>
+            <text class="lbl dim" x="810" y="207" text-anchor="end">and the locked ZIP</text>
+            <!-- 3 dashboard -> app -->
+            <line class="msg live" x1="670" y1="112" x2="332" y2="112" marker-end="url(#a3)"/>
+            <text class="lbl m live" x="500" y="104" text-anchor="middle">3  onFiltersChanged(filters)</text>
+            <!-- 4 page -> backend -->
+            <line class="msg live" x1="110" y1="140" x2="110" y2="248" marker-end="url(#a3)"/>
+            <text class="lbl m" x="120" y="180">4  POST /event</text>
+            <!-- 7 backend -> page -->
+            <line class="msg ret" x1="290" y1="250" x2="290" y2="142" marker-end="url(#a3r)"/>
+            <text class="lbl dim" x="280" y="222" text-anchor="end">7  totals to KPIs</text>
+            <!-- 5 backend -> delta -->
+            <line class="msg" x1="330" y1="286" x2="668" y2="286" marker-end="url(#a3r)" style="stroke:var(--fg)"/>
+            <text class="lbl" x="500" y="278" text-anchor="middle">5  INSERT params · run same SQL · INSERT results</text>
+            <!-- 6 delta -> backend -->
+            <line class="msg ret" x1="670" y1="326" x2="332" y2="326" marker-end="url(#a3r)"/>
+            <text class="lbl dim" x="500" y="318" text-anchor="middle">6  rows: trips, total fare, top ZIP</text>
+          </svg>
+        </div>
+        <figcaption>The loop works in both directions. If the viewer changes the filter inside the dashboard, the flow starts at step 3. If your page changes it, it starts at step 1 and step 3 confirms it. The dashboard never sends data out by itself: your backend runs the dashboard's own query (step 5) so the numbers in your app match what the viewer sees.</figcaption>
+      </figure>
+    </div>
+  </section>
+</div>
+</body>
+</html>
