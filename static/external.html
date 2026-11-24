@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>External Embed POC</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --muted:#5f6b7a; --line:#dde1e6; --accent:#e11d48; --ok:#0f766e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); background:var(--card); display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0; } header a, header span { color:var(--muted); font-size:12px; }
+  main { display:grid; grid-template-columns: 340px 1fr; gap:16px; padding:16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 10px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+  input, select { width:100%; padding:8px; border:1px solid var(--line); border-radius:6px; font:inherit; background:#fff; }
+  button { margin-top:12px; width:100%; padding:9px; border:0; border-radius:6px; background:var(--accent); color:#fff; font-weight:600; cursor:pointer; }
+  button.secondary { background:#fff; color:var(--ink); border:1px solid var(--line); }
+  button:disabled { opacity:.6; cursor:wait; }
+  #dash { min-height:720px; border:1px solid var(--line); border-radius:10px; background:#fff; overflow:hidden; }
+  #dash iframe { width:100%; height:720px; border:0; }
+  .kpis { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .kpi b { display:block; font-size:20px; } .kpi span { font-size:11px; color:var(--muted); }
+  .locked { font-size:12px; padding:8px; border-radius:6px; background:#f0fdfa; color:var(--ok); margin-top:10px; }
+  #log { font:11px/1.5 ui-monospace, monospace; max-height:180px; overflow:auto; white-space:pre-wrap; color:var(--muted); margin:0; }
+  table { width:100%; border-collapse:collapse; font-size:12px; } td, th { padding:4px 6px; border-bottom:1px solid var(--line); text-align:left; }
+  .stack { display:grid; gap:16px; align-content:start; }
+  #err { color:var(--accent); font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Option 2: embedding for external users</h1>
+  <span>no Databricks login, scoped token per viewer</span>
+  <a href="/">option 1 (basic iframe)</a>
+</header>
+<main>
+  <div class="stack">
+    <div class="card">
+      <h2>1. Sign in to <em>your</em> app</h2>
+      <label>User (simulated app login)</label>
+      <select id="user"><option>alice</option><option>bob</option><option>carol</option></select>
+      <button id="login">Load dashboard as this user</button>
+      <div class="locked" id="locked" hidden></div>
+      <div id="err"></div>
+    </div>
+    <div class="card">
+      <h2>2. App &rarr; dashboard (setFilters)</h2>
+      <label>Min fare ($)</label><input id="fare" type="number" step="0.5" value="0">
+      <button id="push" class="secondary" disabled>Push to dashboard</button>
+    </div>
+    <div class="card">
+      <h2>3. Dashboard &rarr; app (onFiltersChanged)</h2>
+      <div class="kpis">
+        <div class="kpi"><b id="k1">–</b><span>Trips</span></div>
+        <div class="kpi"><b id="k2">–</b><span>Total fare $</span></div>
+        <div class="kpi"><b id="k3">–</b><span>Top dropoff</span></div>
+      </div>
+      <pre id="log"></pre>
+    </div>
+    <div class="card">
+      <h2>4. Stored in Databricks</h2>
+      <table><thead><tr><th>User</th><th>ZIP</th><th>Min $</th><th>Trips</th><th>Source</th></tr></thead><tbody id="hist"></tbody></table>
+    </div>
+  </div>
+  <div id="dash"></div>
+</main>
+
+<script type="module">
+import { DatabricksDashboard } from 'https://cdn.jsdelivr.net/npm/@databricks/aibi-client@1.2.1/+esm';
+
+const $ = (id) => document.getElementById(id);
+const log = (msg) => { $('log').textContent = `${new Date().toLocaleTimeString()}  ${msg}\n` + $('log').textContent; };
+let dashboard = null, session = null;
+
+async function api(path, body) {
+  const res = await fetch(path, { method: body ? 'POST' : 'GET',
+    headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || res.status);
+  return data;
+}
+
+async function loadHistory() {
+  const rows = await api('/api/history');
+  $('hist').innerHTML = rows.map(r => `<tr><td>${r.session_id}</td><td>${r.pickup_zip}</td><td>${r.min_fare}</td>
+    <td>${r.total_trips ?? '–'}</td><td>${r.source}</td></tr>`).join('');
+}
+
+function fareFrom(filters) {
+  const f = filters.find(f => f.id === session.fare_filter_id);
+  const v = f && typeof f.value === 'string' ? parseFloat(f.value) : NaN;
+  return Number.isFinite(v) ? v : 0;
+}
+
+// Dashboard -> app: every filter change in the dashboard is sent to our API, which stores it in
+// Databricks and returns the same numbers the dashboard shows.
+async function onDashboardFilters(filters) {
+  const min_fare = fareFrom(filters);
+  $('fare').value = min_fare;
+  log(`dashboard filter changed -> min_fare=${min_fare}`);
+  const res = await api('/api/external/event', { user_id: $('user').value, min_fare });
+  $('k1').textContent = res.summary.total_trips;
+  $('k2').textContent = res.summary.total_fare;
+  $('k3').textContent = res.summary.top_dropoff_zip ?? '–';
+  loadHistory();
+}
+
+$('login').addEventListener('click', async () => {
+  $('err').textContent = ''; $('login').disabled = true;
+  try {
+    const user_id = $('user').value;
+    session = await api('/api/external/token', { user_id });      // server mints scoped token
+    $('locked').hidden = false;
+    $('locked').textContent = `Locked by server in the token: pickup ZIP ${session.pickup_zip} (${user_id} cannot change it)`;
+    log(`token minted for ${user_id}, expires in ${session.expires_in}s`);
+
+    dashboard?.destroy?.();
+    $('dash').innerHTML = '';
+    dashboard = new DatabricksDashboard({
+      instanceUrl: session.instance_url,
+      workspaceId: session.workspace_id,
+      dashboardId: session.dashboard_id,
+      token: session.token,
+      container: $('dash'),
+      colorScheme: 'light',
+      getNewToken: async () => (await api('/api/external/token', { user_id })).token,
+    });
+    await dashboard.initialize();
+
+    dashboard.onFiltersReady(({ filters }) => {
+      log('filters ready: ' + JSON.stringify(filters.map(f => ({ id: f.id, type: f.widgetType, value: f.value }))));
+      $('push').disabled = false;
+      onDashboardFilters(filters);
+    });
+    dashboard.onFiltersChanged(onDashboardFilters);
+  } catch (e) { $('err').textContent = String(e.message || e); }
+  finally { $('login').disabled = false; }
+});
+
+// App -> dashboard: drive the embedded dashboard's filter from the host page.
+$('push').addEventListener('click', async () => {
+  const filters = await dashboard.getFilters();
+  const f = filters.find(f => f.id === session.fare_filter_id);
+  await dashboard.setFilters([{ id: session.fare_filter_id, type: f?.widgetType || 'text', value: String($('fare').value) }]);
+  log(`app set ${session.fare_filter_id} = ${$('fare').value}`);
+});
+
+loadHistory();
+</script>
+</body>
+</html>

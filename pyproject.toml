@@ -1,0 +1,10 @@
+[project]
+name = "poc-dashboard"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "databricks-sdk>=0.170.0",
+    "fastapi>=0.165.0",
+    "httpx>=0.28.1",
+    "uvicorn[standard]>=0.54.0",
+]

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dashboard Embed POC</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1b1f24; --muted:#5f6b7a; --line:#dde1e6; --accent:#e11d48; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--ink); }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); background:var(--card); display:flex; gap:12px; align-items:baseline; }
+  header h1 { font-size:16px; margin:0; } header a { color:var(--muted); font-size:12px; }
+  main { display:grid; grid-template-columns: 320px 1fr; gap:16px; padding:16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 10px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+  input { width:100%; padding:8px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  button { margin-top:14px; width:100%; padding:9px; border:0; border-radius:6px; background:var(--accent); color:#fff; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  iframe { width:100%; height:720px; border:1px solid var(--line); border-radius:10px; background:#fff; }
+  .kpis { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .kpi b { display:block; font-size:20px; } .kpi span { font-size:11px; color:var(--muted); }
+  table { width:100%; border-collapse:collapse; font-size:12px; } td, th { padding:4px 6px; border-bottom:1px solid var(--line); text-align:left; }
+  code { font-size:11px; word-break:break-all; color:var(--muted); }
+  .stack { display:grid; gap:16px; align-content:start; }
+  #err { color:var(--accent); font-size:12px; }
+</style>
+</head>
+<body>
+<header><h1>External app &rarr; Databricks dashboard POC</h1><a id="dlink" target="_blank">open dashboard in Databricks</a></header>
+<main>
+  <div class="stack">
+    <form class="card" id="f">
+      <h2>Parameters (app &rarr; dashboard)</h2>
+      <label>Pickup ZIP</label><input name="pickup_zip" type="number" value="10001" required>
+      <label>Min fare ($)</label><input name="min_fare" type="number" step="0.5" value="0" required>
+      <label>Session / user id</label><input name="session_id" value="demo">
+      <button id="go">Apply</button>
+      <div id="err"></div>
+    </form>
+    <div class="card">
+      <h2>Returned to app (dashboard data &rarr; app)</h2>
+      <div class="kpis">
+        <div class="kpi"><b id="k1">–</b><span>Trips</span></div>
+        <div class="kpi"><b id="k2">–</b><span>Total fare $</span></div>
+        <div class="kpi"><b id="k3">–</b><span>Top dropoff</span></div>
+      </div>
+      <p><code id="url"></code></p>
+    </div>
+    <div class="card">
+      <h2>Stored in Databricks</h2>
+      <table><thead><tr><th>ZIP</th><th>Min $</th><th>Trips</th><th>When</th></tr></thead><tbody id="hist"></tbody></table>
+    </div>
+  </div>
+  <iframe id="dash" title="Databricks dashboard"></iframe>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+
+async function loadHistory() {
+  const rows = await fetch('/api/history').then(r => r.json());
+  $('hist').innerHTML = rows.map(r =>
+    `<tr><td>${r.pickup_zip}</td><td>${r.min_fare}</td><td>${r.total_trips ?? '–'}</td><td>${(r.created_at||'').slice(11,19)}</td></tr>`).join('');
+}
+
+fetch('/api/config').then(r => r.json()).then(c => {
+  $('dash').src = c.embed_url; $('dlink').href = c.dashboard_url;
+});
+loadHistory();
+
+$('f').addEventListener('submit', async (e) => {
+  e.preventDefault(); $('go').disabled = true; $('err').textContent = '';
+  const fd = new FormData(e.target);
+  const body = { pickup_zip: +fd.get('pickup_zip'), min_fare: +fd.get('min_fare'), session_id: fd.get('session_id') };
+  try {
+    const res = await fetch('/api/params', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.status);
+    $('dash').src = data.embed_url;            // app -> dashboard
+    $('url').textContent = data.embed_url;
+    $('k1').textContent = data.summary.total_trips;   // dashboard data -> app
+    $('k2').textContent = data.summary.total_fare;
+    $('k3').textContent = data.summary.top_dropoff_zip ?? '–';
+    loadHistory();                              // read back from Databricks
+  } catch (err) { $('err').textContent = String(err.message || err); }
+  finally { $('go').disabled = false; }
+});
+</script>
+</body>
+</html>
