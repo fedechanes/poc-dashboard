@@ -1,0 +1,16 @@
+# Curated business metadata. This is the governed source: it wins over drafted definitions and
+# over existing comments, and the agent writes it back as the column comment.
+# Keys are <layer>.<table>.<column>. Edit, re-run the agent: only the changed columns are rewritten.
+
+[owners]
+# Data owner / steward per layer; "<layer>.<table>" keys override a layer.
+bronze = "Data Platform team"
+silver = "Data Engineering team"
+gold = "Sales Analytics team"
+"gold.daily_sales" = "Finance team"
+
+[definitions]
+"silver.customers.customer_id" = "Unique customer number from the CRM (the C-prefixed CRM id without the prefix). Primary key of a customer across all layers."
+"silver.orders.net_amount_eur" = "Order value after line discount, converted to EUR with the fixed FX table (USD 0.926, GBP 1.163)."
+"gold.customer_360.lifetime_value_eur" = "Total net spend in EUR of the customer over all orders that were not cancelled or returned."
+"gold.customer_360.order_count" = "Number of the customer's orders that were not cancelled or returned."

@@ -17,6 +17,13 @@ AI/BI dashboard and passes parameters both ways.
 
 Diagrams of both flows: `docs/embed-flows.html`.
 
+## Separate POC: `sttm-agent/`
+
+`sttm-agent/` is an independent POC: an STTM agent over a synthetic Lakeflow medallion. It has its own
+`README.md`, its own `.env` (`sttm-agent/.env`), its own state file (`sttm_state.json`, gitignored), and its own
+schemas (`<catalog>.sttm_*`). The same rules apply: no workspace-specific values in code, and re-runs must be
+safe. It shares only `pyproject.toml` with the dashboard POC. Run it with `uv run python sttm-agent/run.py <command>`.
+
 ## Layout
 
 | Path | Role |

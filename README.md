@@ -14,6 +14,9 @@ Two embedding options:
 | App → dashboard | filter values in the iframe URL (`f_<page>~<widget>=…`) | `setFilters()` from `@databricks/aibi-client`, plus a **locked** value in the token (`__aibi_external_value`) |
 | Dashboard → app | not possible (iframe can't send events); API re-runs the dashboard query | `onFiltersChanged()` → API |
 
+> **Also in this repo:** [`sttm-agent/`](sttm-agent/README.md), a separate POC with an STTM (source-to-target
+> mapping) agent on a synthetic bronze/silver/gold medallion. It has its own schemas, pipeline and README.
+
 ## Requirements
 
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/)

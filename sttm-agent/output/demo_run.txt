@@ -1,0 +1,121 @@
+# Output of: run.py setup (agent part) followed by run.py demo, on Databricks Free Edition, 2026-11-25
+
+=== 4. STTM agent
+STTM agent run 20261125T110744Z
+   UC lineage since 1970-01-01T00:00:00Z (- lookback): 65 column events (65 without a source column), 12 table events -> 0 column edges, 9 table edges
+   9 target tables, 9 to process:
+     bronze.customers_raw         new table
+     bronze.orders_raw            new table
+     bronze.products_raw          new table
+     silver.customers             new table
+     silver.customers_cleansed    new table
+     silver.orders                new table
+     silver.products              new table
+     gold.customer_360            new table
+     gold.daily_sales             new table
+   LLM: bronze.customers_raw: 11 to draft, 0 to check
+   LLM: bronze.orders_raw: 13 to draft, 0 to check
+   LLM: bronze.products_raw: 9 to draft, 0 to check
+   LLM: silver.customers_cleansed: 7 to draft, 0 to check
+     verified 7 drafts, corrected 2
+   LLM: silver.customers: 0 to draft, 1 to check
+   LLM: silver.orders: 10 to draft, 1 to check
+     verified 10 drafts, corrected 1
+   LLM: silver.products: 5 to draft, 0 to check
+     verified 5 drafts, corrected 0
+   LLM: gold.customer_360: 3 to draft, 3 to check
+     verified 3 drafts, corrected 2
+   LLM: gold.daily_sales: 4 to draft, 4 to check
+     verified 4 drafts, corrected 0
+   write-back: 77 column comments, 82 column tag sets
+   exported 82 rows -> sttm-agent/output/sttm.csv, sttm-agent/output/sttm.md
+   tables_processed=9, rows_inserted=82, rows_updated=0, rows_deactivated=0, rows_unchanged=0, llm_calls=38, comments_written=77, tags_written=82, open_issues=3, uc_edges_new=9, sttm_version=1, seconds=312
+---
+
+=== 1. land raw batch 2 (new + updated customers, new orders, status changes, price changes)
+   customers/crm_export_002.json (55 customers)
+   orders/web_orders_002.json (500 order events)
+   products/catalogue_002.csv (6 products)
+
+=== 2. change the deployed pipeline SQL
+   silver.sql: order_status = 'cancelled'                                         AS is_cancelled, | net_amount * fx_rate_to_eur >= 250                                 AS is_large_order
+   gold.sql: sum(net_amount_eur) FILTER (WHERE NOT is_cancelled)              AS lifetime_value_eur, | count(DISTINCT order_id) FILTER (WHERE is_large_order AND NOT is_cancelled) AS large_order_count
+   gold.sql: coalesce(s.lifetime_value_eur, 0)                                  AS lifetime_value_eur, | coalesce(s.large_order_count, 0)                                   AS large_order_count,
+
+=== 3. pipeline run: only new files are ingested; tables refresh incrementally where possible
+   pipeline update finished in 82s
+     sttm_bronze.customers_raw              rows written     55   streaming append
+     sttm_bronze.orders_raw                 rows written    500   streaming append
+     sttm_bronze.products_raw               rows written      6   streaming append
+     sttm_gold.customer_360                 rows written    230   complete_recompute
+     sttm_gold.daily_sales                  rows written   1049   generic_aggregate
+     sttm_meta.customers_upsert             rows written     55   AUTO CDC upsert
+     sttm_silver.customers_cleansed         rows written     55   streaming append
+     sttm_silver.orders                     rows written   1500   complete_recompute
+     sttm_silver.products                   rows written     40   window_function
+   bronze.customers_raw: crm_export_001.json=200, crm_export_002.json=55
+   bronze.orders_raw: web_orders_001.json=1931, web_orders_002.json=500
+   silver.customers: 230 rows for 230 customers (AUTO CDC upserted the updates)
+
+=== 4. STTM agent, incremental
+STTM agent run 20261125T111436Z
+   UC lineage since 2026-11-25T10:44:01.215Z (- lookback): 65 column events (65 without a source column), 13 table events -> 0 column edges, 10 table edges
+   9 target tables, 4 to process:
+     silver.orders                sql, schema
+     silver.products              uc_edges
+     gold.customer_360            sql, schema
+     gold.daily_sales             upstream silver.orders, silver.products
+   LLM: silver.orders: 2 to draft, 0 to check
+     verified 2 drafts, corrected 1
+   LLM: gold.customer_360: 1 to draft, 3 to check
+     verified 1 drafts, corrected 1
+   LLM: gold.daily_sales: 4 to draft, 4 to check
+     verified 4 drafts, corrected 0
+   write-back: 7 column comments, 7 column tag sets
+   exported 84 rows -> sttm-agent/output/sttm.csv, sttm-agent/output/sttm.md
+   tables_processed=4, rows_inserted=2, rows_updated=12, rows_deactivated=0, rows_unchanged=70, llm_calls=10, comments_written=7, tags_written=7, open_issues=8, uc_edges_new=10, sttm_version=3, seconds=55
+
+=== 5. what changed in workspace.sttm_meta.sttm (change data feed, versions 2..3)
+   update_postimage  gold.customer_360.avg_order_value_eur    changed: issues, lineage_hash
+       issue: CONFLICT: uc_comment definition contradicts the transformation: The existing definition incorrectly states that cancelled orders are included, but the SQL explicitly filters them out using NOT is_cancelled. The correct definition must reflect that only non-cancelled orders are used in both numerator and denominator.
+       issue: REVIEW: upstream rule changed (silver.orders.is_cancelled); confirm this uc_comment definition still holds
+   insert            gold.customer_360.large_order_count      
+   update_postimage  gold.customer_360.lifetime_value_eur     changed: issues, lineage_hash
+       issue: REVIEW: upstream rule changed (silver.orders.is_cancelled); confirm this glossary definition still holds
+   update_postimage  gold.customer_360.order_count            changed: issues, lineage_hash
+       issue: REVIEW: upstream rule changed (silver.orders.is_cancelled); confirm this glossary definition still holds
+   update_postimage  gold.daily_sales.category               changed: issues, lineage_hash
+       issue: REVIEW: upstream rule changed (silver.orders.is_cancelled); confirm this pipeline_sql definition still holds
+   update_postimage  gold.daily_sales.country_code           changed: issues, lineage_hash
+       issue: REVIEW: upstream rule changed (silver.orders.is_cancelled); confirm this pipeline_sql definition still holds
+   update_postimage  gold.daily_sales.gross_margin_eur       changed: issues, lineage_hash
+       issue: CONFLICT: pipeline_sql definition contradicts the transformation: The existing definition incorrectly states 'Revenue before discounts', but the expression computes gross margin as revenue minus cost price, not revenue. This is a factual mismatch in meaning.
+       issue: REVIEW: upstream rule changed (silver.orders.is_cancelled); confirm this pipeline_sql definition still holds
+       issue: FIX IN PIPELINE SQL: the comment is declared in the pipeline and a refresh restores it
+   update_postimage  gold.daily_sales.order_date             changed: issues, lineage_hash
+       issue: REVIEW: upstream rule changed (silver.orders.is_cancelled); confirm this pipeline_sql definition still holds
+   update_postimage  gold.daily_sales.orders                 changed: business_definition, lineage_hash
+       definition was: Number of unique orders placed per day by product category and customer country, excluding cancelled and returned orders.
+       definition now: Number of unique orders placed per day by product category and customer country, excluding only cancelled orders (returned orders are included).
+   update_postimage  gold.daily_sales.report_currency        changed: business_definition, lineage_hash
+       definition was: The currency used for all financial values in this table: EUR.
+       definition now: The currency unit used for all monetary values in this table: EUR.
+   update_postimage  gold.daily_sales.revenue_eur            changed: business_definition, lineage_hash
+       definition was: Total revenue in euros per day by product category and customer country, excluding cancelled and returned orders; calculated as quantity times unit price minus discount, converted to EUR using fixed exchange rates.
+       definition now: Total revenue in euros per day by product category and customer country, excluding only cancelled orders (returned orders are included); calculated as net amount after discounts and converted using FX rates.
+   update_postimage  gold.daily_sales.units                  changed: business_definition, lineage_hash
+       definition was: Total quantity of products sold per day by product category and customer country, excluding cancelled and returned orders.
+       definition now: Total quantity of products sold per day by product category and customer country, excluding only cancelled orders (returned orders are included).
+   update_postimage  silver.orders.is_cancelled           changed: transformation, business_definition, lineage_hash
+       definition was: Indicates whether the order has been cancelled or returned, based on the latest status being 'cancelled' or 'returned'.
+       definition now: True if the order's most recent status is 'cancelled', meaning the order was terminated before fulfillment by the customer or merchant; includes all orders that have ever had a status, but only marks those with 'cancelled' as the latest status.
+   insert            silver.orders.is_large_order         
+
+=== 6. STTM agent again with nothing changed (should touch nothing)
+STTM agent run 20261125T111535Z
+   UC lineage since 2026-11-25T10:57:52.117Z (- lookback): 65 column events (65 without a source column), 13 table events -> 0 column edges, 10 table edges
+   9 target tables, 0 to process:
+   write-back: UC already matches, nothing to write
+   exported 84 rows -> sttm-agent/output/sttm.csv, sttm-agent/output/sttm.md
+   tables_processed=0, rows_inserted=0, rows_updated=0, rows_deactivated=0, rows_unchanged=84, llm_calls=0, comments_written=0, tags_written=0, open_issues=8, uc_edges_new=10, sttm_version=3, seconds=25
+---

@@ -2,3 +2,4 @@
 __pycache__/
 poc_state.json
 .env
+sttm_state.json
