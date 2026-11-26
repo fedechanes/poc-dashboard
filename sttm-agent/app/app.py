@@ -13,9 +13,10 @@ warehouse come from the app's service principal and its sql-warehouse resource).
                            empty = anyone who can open the app)
   STTM_AUDIT_HISTORY_DAYS  days of history in the "Download for audit" workbook (default 30)
 
-Reads run as the app's service principal. Steward actions (approve, edit, "still correct") and issue statuses run as
-the signed-in user with the token Databricks Apps forwards (user authorization, `sql` scope), so Unity Catalog checks
-the user's own MODIFY grant on glossary / issue_status and records the user as the writer. Locally both run as your
+Reads run as the app's service principal. Steward actions (approve, edit, "still correct", sensitivity overrides) and
+issue statuses run as the signed-in user with the token Databricks Apps forwards (user authorization, `sql` scope), so
+Unity Catalog checks the user's own MODIFY grant on glossary / sensitivity_overrides / issue_status and records the user
+as the writer. Locally both run as your
 CLI profile.
 """
 
@@ -62,7 +63,8 @@ AUDIT_HISTORY_DAYS = int(os.getenv("STTM_AUDIT_HISTORY_DAYS", "30"))
 
 # Filters: query parameter -> SQL column. Every filter takes several values (OR within a filter, AND across).
 EQ_FILTERS = {"table": "target_table", "layer": "layer", "owner": "owner", "definition_source": "definition_source",
-              "kind": "mapping_kind", "origin": "lineage_origin", "data_type": "data_type", "run": "last_changed_run"}
+              "kind": "mapping_kind", "origin": "lineage_origin", "data_type": "data_type", "run": "last_changed_run",
+              "sensitivity": "sensitivity", "sensitivity_source": "sensitivity_source"}
 FACETS = {**EQ_FILTERS, "issue": None}
 
 w = WorkspaceClient()
@@ -97,6 +99,8 @@ GLOSSARY_TABLE = TABLE.rsplit(".", 1)[0] + ".`glossary`"
 OWNERS_TABLE = TABLE.rsplit(".", 1)[0] + ".`owners`"
 ISSUES_TABLE = TABLE.rsplit(".", 1)[0] + ".`issues`"
 STATUS_TABLE = TABLE.rsplit(".", 1)[0] + ".`issue_status`"
+OVERRIDES_TABLE = TABLE.rsplit(".", 1)[0] + ".`sensitivity_overrides`"
+SENSITIVITY = ("pii", "pii_derived", "none")
 STATUSES = ("open", "in_progress", "accepted", "wont_fix")
 STEWARDS = os.getenv("STTM_STEWARDS_GROUP", "sttm-stewards")
 IN_APP = bool(os.getenv("DATABRICKS_APP_PORT"))
@@ -174,13 +178,16 @@ def facets(refresh: bool = False) -> dict:
         for f in out:
             out[f].sort(key=lambda x: x["value"], reverse=f == "run")
         tables = run_sql(f"""SELECT target_table, layer, owner, uc_table, any_value(table_rule) AS table_rule,
-                                    count(*) AS columns, count_if(has_open_issue) AS open_issues
+                                    count(*) AS columns, count_if(has_open_issue) AS open_issues,
+                                    count_if(sensitivity = 'pii') AS pii_columns,
+                                    count_if(sensitivity = 'pii_derived') AS pii_derived_columns
                              FROM {TABLE} GROUP BY ALL""")
         upstream = run_sql(f"""SELECT DISTINCT c FROM {TABLE}
                                LATERAL VIEW explode(split(upstream_columns, '; ')) AS c WHERE c <> ''
                                UNION SELECT concat(target_table, '.', target_column) FROM {TABLE}""")
         stats = run_sql(f"""SELECT count(*) AS columns, count(DISTINCT target_table) AS tables,
                                    count_if(has_open_issue) AS open_issues, max(updated_at) AS updated_at,
+                                   count_if(sensitivity IN ('pii', 'pii_derived')) AS personal_columns,
                                    max(last_changed_run) AS last_run FROM {TABLE}""")[0]
         # table-level edges for the lineage map: from every direct source and table-rule column
         edges = set()
@@ -221,7 +228,7 @@ def filtered_rows(f: dict, refresh: bool = False) -> list[dict]:
         params["issue"] = json.dumps(f["issue"])
     if f.get("q"):
         where.append("""lower(concat_ws(' ', target_table, target_column, business_definition, transformation,
-                         source_columns, proposed_definition)) LIKE concat('%', lower(:q), '%')""")
+                         source_columns, proposed_definition, sensitivity_reason)) LIKE concat('%', lower(:q), '%')""")
         params["q"] = f["q"]
     if f.get("depends_on"):
         # a column (silver.orders.is_cancelled) or a table (bronze.orders_raw): everything downstream of it
@@ -237,7 +244,8 @@ def filtered_rows(f: dict, refresh: bool = False) -> list[dict]:
 def sttm(request: Request, table: list[str] = Query(None), layer: list[str] = Query(None),
          owner: list[str] = Query(None), definition_source: list[str] = Query(None), kind: list[str] = Query(None),
          origin: list[str] = Query(None), data_type: list[str] = Query(None), run: list[str] = Query(None),
-         issue: list[str] = Query(None), q: str | None = None, depends_on: str | None = None,
+         issue: list[str] = Query(None), sensitivity: list[str] = Query(None),
+         sensitivity_source: list[str] = Query(None), q: str | None = None, depends_on: str | None = None,
          refresh: bool = False) -> dict:
     """Filtered STTM rows (several values per filter: OR within a filter, AND across filters)."""
     return {"rows": filtered_rows(filters_of(request), refresh)}
@@ -336,6 +344,47 @@ def decide(d: Decision, request: Request) -> dict:
     glossary(refresh=True)
     forget("history")
     return {"ok": True, "column": d.column, "action": d.action}
+
+
+# ---------------------------------------------------------------------------------------------------- sensitivity
+
+@app.get("/api/sensitivity")
+def sensitivity_overrides(refresh: bool = False) -> dict:
+    """Steward overrides of the personal data level, including the ones the agent hasn't applied yet."""
+    rows = cached("overrides", lambda: run_sql(f"""SELECT column_key, sensitivity, note, updated_by, updated_at
+        FROM {OVERRIDES_TABLE} ORDER BY column_key"""), refresh)
+    return {"rows": rows}
+
+
+class SensitivityDecision(BaseModel):
+    column: str                       # <layer>.<table>.<column>
+    sensitivity: str | None = None    # pii | pii_derived | none; None = remove the override (the agent decides again)
+    note: str | None = None
+
+
+@app.post("/api/sensitivity")
+def set_sensitivity(d: SensitivityDecision, request: Request) -> dict:
+    """Override (or stop overriding) a column's sensitivity as the signed-in user. The agent applies it on its next
+    run, and columns downstream inherit it."""
+    require_steward(request)
+    if d.sensitivity is not None and d.sensitivity not in SENSITIVITY:
+        raise HTTPException(400, f"sensitivity must be one of {', '.join(SENSITIVITY)}, or empty to remove the override")
+    t, _, col = d.column.rpartition(".")
+    if not run_sql(f"SELECT 1 FROM {TABLE} WHERE target_table = :t AND target_column = :c", {"t": t, "c": col}):
+        raise HTTPException(404, f"Unknown column {d.column}")
+    client = user_client(request)
+    if d.sensitivity is None:
+        run_sql(f"DELETE FROM {OVERRIDES_TABLE} WHERE column_key = :k", {"k": d.column}, client=client)
+    else:
+        run_sql(f"""MERGE INTO {OVERRIDES_TABLE} o USING (SELECT :k AS k) s ON o.column_key = s.k
+            WHEN MATCHED THEN UPDATE SET sensitivity = :v, note = :n, updated_by = current_user(),
+                 updated_at = current_timestamp()
+            WHEN NOT MATCHED THEN INSERT (column_key, sensitivity, note, updated_by, updated_at)
+                 VALUES (:k, :v, :n, current_user(), current_timestamp())""",
+                {"k": d.column, "v": d.sensitivity, "n": (d.note or "").strip()[:500] or None}, client=client)
+    sensitivity_overrides(refresh=True)
+    forget("history")
+    return {"ok": True, "column": d.column, "sensitivity": d.sensitivity}
 
 
 # ---------------------------------------------------------------------------------------------------- issues

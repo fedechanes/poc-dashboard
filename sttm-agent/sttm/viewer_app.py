@@ -4,10 +4,11 @@ Safe to re-run: creates the job and the app once, then updates and redeploys the
 - The agent job runs `run.py agent` on serverless compute as the person who deploys (it writes comments and tags,
   reads system tables and calls the LLM, so it keeps the deployer's permissions).
 - The app runs as its own service principal. It can use the SQL warehouse, start the agent job (CAN_MANAGE_RUN),
-  and read seven tables: sttm_export, sttm (its change data feed, for History), agent_runs, glossary, owners, issues
-  and issue_status. Nothing else.
+  and read eight tables: sttm_export, sttm (its change data feed, for History), agent_runs, glossary,
+  sensitivity_overrides, owners, issues and issue_status. Nothing else.
 - Steward and owner actions run as the signed-in user (user authorization, `sql` scope). The stewards group
-  (STTM_STEWARDS_GROUP, default sttm-stewards) gets SELECT + MODIFY on glossary and issue_status; the members of each
+  (STTM_STEWARDS_GROUP, default sttm-stewards) gets SELECT + MODIFY on glossary, sensitivity_overrides and
+  issue_status; the members of each
   owner team (sttm_meta.owners) get SELECT + MODIFY on issue_status. The group itself and its members are managed
   outside this script (account console or SCIM).
 - Notifications: one Databricks SQL alert per owner team (Alerts v2), subscribed by the team's notify_email. The
@@ -228,7 +229,8 @@ def ensure_app(w: WorkspaceClient, warehouse_id: str, job_id: int, log=print) ->
 
 # sttm: the History tab reads its change data feed (table_changes needs SELECT on the table); the other history
 # tables (glossary, issues, issue_status) are read already
-APP_READS = ("sttm_export", "sttm", "agent_runs", "glossary", "owners", "issues", "issue_status")
+APP_READS = ("sttm_export", "sttm", "agent_runs", "glossary", "sensitivity_overrides", "owners", "issues",
+             "issue_status")
 
 
 def grant_read(w: WorkspaceClient, app: A.App, log=print) -> None:
@@ -243,9 +245,10 @@ def grant_read(w: WorkspaceClient, app: A.App, log=print) -> None:
         try:
             for sql in (f"GRANT USE CATALOG ON CATALOG `{CATALOG}` TO {g}", f"GRANT USE SCHEMA ON SCHEMA {meta} TO {g}",
                         f"GRANT SELECT, MODIFY ON TABLE {meta}.glossary TO {g}",
+                        f"GRANT SELECT, MODIFY ON TABLE {meta}.sensitivity_overrides TO {g}",
                         f"GRANT SELECT, MODIFY ON TABLE {meta}.issue_status TO {g}"):
                 run_sql(w, sql)
-            log(f"   granted {STEWARDS} SELECT + MODIFY on glossary and issue_status")
+            log(f"   granted {STEWARDS} SELECT + MODIFY on glossary, sensitivity_overrides and issue_status")
         except RuntimeError as e:
             log(f"   ! could not grant {STEWARDS} (does the group exist?): {str(e)[:160]}")
     # owners set the status of issues on their tables: each member of an owner team may write issue_status

@@ -3,7 +3,7 @@
 - Agent runs come from `agent_runs`. A run's STTM changes are the CDF rows of `sttm` with a commit version in
   (version before the run, `sttm_version`]. The version before is `details.sttm_version_before` when the agent recorded
   it; for older runs it is the previous run's `sttm_version`, which is the same thing because only the agent writes `sttm`.
-- Steward decisions are the CDF of `glossary`, owner statuses the CDF of `issue_status`, and issue openings and
+- Steward decisions are the CDF of `glossary` and `sensitivity_overrides`, owner statuses the CDF of `issue_status`, and issue openings and
   closings the CDF of `issues`. Who did it is the row's `updated_by` (`current_user()` at write time); for a deleted
   glossary row it is the `userName` of that commit in DESCRIBE HISTORY.
 
@@ -23,10 +23,11 @@ FIELDS = {
     "business_definition": "Definition", "definition_source": "Definition source", "transformation": "Rule",
     "table_rule": "Table rule", "issues": "Issues", "proposed_definition": "Suggested definition",
     "source_columns": "Sources", "data_type": "Type", "owner": "Owner", "is_active": "Active",
+    "sensitivity": "Personal data", "sensitivity_source": "Personal data source",
 }
 LIST_FIELDS = ("issues", "source_columns")
 MAX_FALLBACK_TRIES = 40
-VERSIONED = ("sttm", "sttm_export", "glossary", "issue_status", "issues")   # latest Delta version, for the audit cover
+VERSIONED = ("sttm", "sttm_export", "glossary", "sensitivity_overrides", "issue_status", "issues")   # latest Delta version, for the audit cover
 
 
 def _lit(table: str) -> str:
@@ -122,6 +123,7 @@ class History:
                                                 "closed_run"), notes),
             "glossary": (self.changes, "glossary", ("column_key, definition, acknowledged_lineage_hash, note, "
                                                     "updated_by, updated_at"), notes),
+            "sens": (self.changes, "sensitivity_overrides", "column_key, sensitivity, note, updated_by", notes),
             "status": (self.changes, "issue_status", ("column_key, issue_type, fingerprint, status, assignee, comment, "
                                                       "updated_by"), notes),
             **{f"v:{t}": (self.versions, t, 1) for t in VERSIONED},
@@ -132,7 +134,8 @@ class History:
         runs = got["runs"]
         self._attach_sttm_changes(runs, got["sttm"])
         self._attach_issue_changes(runs, got["issues"])
-        return {"runs": runs, "decisions": self._glossary_events(got["glossary"]),
+        decisions = self._glossary_events(got["glossary"]) + self._sensitivity_events(got["sens"])
+        return {"runs": runs, "decisions": sorted(decisions, key=lambda d: d["at"]),
                 "statuses": self._status_events(got["status"]), "notes": notes,
                 "versions": {t: (got[f"v:{t}"][:1] or [{}])[0].get("version") for t in VERSIONED}}
 
@@ -221,6 +224,24 @@ class History:
                         "before": before["definition"] if before else None,
                         "after": after["definition"] if after else None,
                         "note": (after or {}).get("note")})
+        return out
+
+    def _sensitivity_events(self, rows: list[dict]) -> list[dict]:
+        """Overrides set, changed or removed. A removed row keeps no updated_by: DESCRIBE HISTORY's userName."""
+        deleted_by = None
+        out = []
+        for before, after, c in self._pairs(rows, lambda r: (r["column_key"],)):
+            if after is None:
+                if deleted_by is None:
+                    deleted_by = {int(h["version"]): h.get("userName") for h in self.versions("sensitivity_overrides")}
+                who = deleted_by.get(int(c["_commit_version"]))
+            else:
+                who = after["updated_by"]
+            out.append({"kind": "decision", "column": (after or before)["column_key"],
+                        "action": "sensitivity" if after else "sensitivity_removed", "field": "sensitivity",
+                        "at": c["_commit_timestamp"], "who": who,
+                        "before": before["sensitivity"] if before else None,
+                        "after": after["sensitivity"] if after else None, "note": (after or {}).get("note")})
         return out
 
     def _status_events(self, rows: list[dict]) -> list[dict]:

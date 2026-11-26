@@ -15,6 +15,7 @@
   --landing: #7d8986; --bronze: #9a5a2c; --silver: #75808d; --gold: #a98114;
   --conflict: #b3261e; --conflict-wash: #f6dedb; --review: #8f5d00; --review-wash: #f4e7cc;
   --gap: #6a4b9f; --gap-wash: #e8e1f3; --edge: #b9c3c0; --code-bg: #e7ece9;
+  --pii: #8c2a5b; --pii-wash: #f6e0eb;
   --sans: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
 }
@@ -25,6 +26,7 @@
     --landing: #7f8b88; --bronze: #d08a55; --silver: #a6b1be; --gold: #d9b44a;
     --conflict: #ff8f84; --conflict-wash: #3b1f1c; --review: #e8b45a; --review-wash: #3a2d14;
     --gap: #bea4ee; --gap-wash: #2b2340; --edge: #3c4a47; --code-bg: #202a28;
+    --pii: #f29ac4; --pii-wash: #3a1d2c;
   }
 }
 :root[data-theme="dark"] {
@@ -33,6 +35,7 @@
   --landing: #7f8b88; --bronze: #d08a55; --silver: #a6b1be; --gold: #d9b44a;
   --conflict: #ff8f84; --conflict-wash: #3b1f1c; --review: #e8b45a; --review-wash: #3a2d14;
   --gap: #bea4ee; --gap-wash: #2b2340; --edge: #3c4a47; --code-bg: #202a28;
+  --pii: #f29ac4; --pii-wash: #3a1d2c;
 }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
@@ -52,6 +55,9 @@ button, input { font: inherit; color: inherit; }
 .btn.primary { background: var(--verdigris); border-color: var(--verdigris); color: var(--surface); font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn:disabled { cursor: default; opacity: .65; filter: none; }
+.btn.toggle { border-radius: 8px; }
+.btn.toggle[aria-pressed="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.toggle .n { font-variant-numeric: tabular-nums; opacity: .75; margin-left: 6px; }
 .agent-line { margin: 8px 0 0; font-size: 14px; max-width: 90ch; }
 .agent-line a { color: var(--verdigris); }
 .agent-line.failed { color: var(--conflict); }
@@ -74,6 +80,7 @@ button, input { font: inherit; color: inherit; }
 .node .nm { display: block; font-weight: 600; font-size: 15px; font-stretch: 85%; }
 .node .ct { display: flex; flex-wrap: wrap; gap: 0 10px; font-size: 12.5px; color: var(--ink-2); }
 .node .flag-n { color: var(--conflict); font-weight: 600; }
+.node .sens { margin-left: 0; }
 .node.on { background: var(--verdigris-wash); border-color: var(--verdigris); border-left-color: var(--metal); }
 .map.focused .node:not(.lit):not(.on) { opacity: .5; }
 .node.landing { border-style: dashed; border-left-style: solid; }
@@ -141,6 +148,14 @@ li.open > .line { background: var(--wash); }
 .src { display: inline-block; margin-left: 6px; font-size: 12px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--hair); color: var(--ink-2); white-space: nowrap; vertical-align: 1px; }
 .src.glossary { border-color: var(--verdigris); color: var(--verdigris); background: var(--verdigris-wash); }
 .src.draft { border-style: dashed; border-color: var(--review); color: var(--review); }
+/* personal data: the label always says it in words; the colour only repeats it */
+.sens { display: inline-block; margin-left: 6px; font: 700 11px/1.6 var(--sans); letter-spacing: .04em; padding: 0 6px; border-radius: 4px; white-space: nowrap; vertical-align: 1px; border: 1px solid var(--pii); }
+.sens-pii { background: var(--pii); color: var(--surface); }
+.sens-pii_derived { color: var(--pii); border-style: dashed; background: var(--pii-wash); }
+.sens-none { color: var(--ink-2); border-color: var(--hair); font-weight: 600; }
+.sensbox p.why { color: var(--ink); }
+.sensbox select, .sensbox input { min-width: 0; font-size: 13.5px; padding: 4px 8px; border: 1px solid var(--hair); border-radius: 6px; background: var(--paper); color: var(--ink); }
+.sensbox input { flex: 1 1 180px; }
 .flags { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
 .flag { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 4px; white-space: nowrap; background: var(--wash); color: var(--ink-2); }
 .flag.conflict { background: var(--conflict-wash); color: var(--conflict); }
@@ -293,6 +308,7 @@ ol.ctl .when { color: var(--ink-2); font-size: 12.5px; }
         <button id="workBtn" aria-pressed="false" title="Open issues on the tables your teams own">My worklist<span class="n" id="nWork"></span></button>
         <button id="histBtn" aria-pressed="false" title="Agent runs and what they changed, steward decisions and issue status changes, newest first">History</button>
       </div>
+      <button class="btn toggle" id="piiBtn" aria-pressed="false" title="Columns that hold personal data (PII) or hashed or masked personal data (PII-derived)">Contains personal data<span class="n" id="nPii"></span></button>
       <input class="field" id="q" type="search" placeholder="Search names, definitions and SQL" aria-label="Search names, definitions and SQL">
       <input class="field dep" id="dep" type="search" list="cols" placeholder="Show what depends on a column or table" aria-label="Show what depends on a column or table">
       <datalist id="cols"></datalist>
@@ -309,6 +325,7 @@ ol.ctl .when { color: var(--ink-2); font-size: 12.5px; }
 const MENUS = [
   ["issue", "Issue type"], ["layer", "Layer"], ["owner", "Owner"], ["definition_source", "Definition source"],
   ["kind", "Mapping"], ["origin", "Lineage origin"], ["run", "Changed in run"], ["data_type", "Data type"],
+  ["sensitivity", "Personal data"], ["sensitivity_source", "Personal data from"],
 ];
 const LAYERS = ["landing", "bronze", "silver", "gold"];
 const ISSUE = {   // type -> [label, css class, tone variable]
@@ -319,10 +336,15 @@ const ISSUE = {   // type -> [label, css class, tone variable]
 const SOURCE = { glossary: "Glossary", pipeline_sql: "Pipeline SQL", uc_comment: "UC comment", inherited: "Inherited", llm: "LLM draft", rule: "Rule draft" };
 const KIND = { direct: "Direct copy", derived: "Derived", constant: "Constant", technical: "Technical" };
 const STATUS = { open: "Open", in_progress: "In progress", accepted: "Accepted", wont_fix: "Won't fix" };
+const SENS = {   // level -> [badge, long label]
+  pii: ["PII", "Personal data (PII)"], pii_derived: ["PII-derived", "Hashed or masked personal data"], none: ["None", "No personal data"],
+};
+const SENS_SRC = { rule: "Name rule", llm: "LLM, from the name only", inherited: "Inherited through the lineage", steward: "Steward override" };
+const PERSONAL = ["pii", "pii_derived"];
 const state = { filters: {}, q: "", depends_on: "", open: null, view: "ledger" };
 const fold = {};   // table -> true (expanded) / false (collapsed), set by the user; otherwise the default below
 let meta = null, rows = [], timer = null, seq = 0;
-let me = null, gloss = {}, editing = null, stewardMsg = null, allRows = {};   // signed-in user, steward decisions by column key
+let me = null, gloss = {}, editing = null, stewardMsg = null, allRows = {}, sens = {}, sensMsg = null;   // signed-in user, steward decisions by column key
 let issues = [], owners = [], issueMsg = null, showClosed = false, allTeams = false;   // tracked issues + owner statuses
 let hist = null, histLoading = null, histErr = null;   // /api/history, loaded on first use
 const histUi = { kind: "all", quiet: false, open: new Set() };   // History tab: type filter, no-op runs, expanded runs
@@ -341,7 +363,8 @@ const fmtRun = (r) => {
   return d.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) + " UTC";
 };
 const label = (key, v) => key === "issue" ? (v === "OPEN" ? "Needs review" : v === "NONE" ? "No issues" : (ISSUE[v]?.[0] || v))
-  : key === "definition_source" ? (SOURCE[v] || v) : key === "kind" ? (KIND[v] || v) : key === "run" ? fmtRun(v) : v;
+  : key === "definition_source" ? (SOURCE[v] || v) : key === "kind" ? (KIND[v] || v) : key === "run" ? fmtRun(v)
+  : key === "sensitivity" ? (SENS[v]?.[1] || v) : key === "sensitivity_source" ? (SENS_SRC[v] || v) : v;
 
 /* ---------- URL state ---------- */
 function readUrl() {
@@ -386,6 +409,7 @@ async function loadMeta(refresh = false) {
   $("source").innerHTML = `${esc(s.columns)} target columns in ${esc(s.tables)} tables, read from <code>${esc(meta.table_name)}</code>. The agent last changed it on ${esc(fmtRun(s.last_run))}.`;
   $("nAll").textContent = s.columns;
   $("nOpen").textContent = s.open_issues;
+  $("nPii").textContent = s.personal_columns ?? "";
   const tables = new Set(meta.columns.map(tableOf));
   $("cols").innerHTML = [...tables, ...meta.columns].map((c) => `<option value="${esc(c)}">`).join("");
   renderMenus();
@@ -448,11 +472,17 @@ function renderMap() {
         const title = l === "landing" ? `Show every column fed by the ${name} files` : `Show the columns of ${n}`;
         return `<button class="node ${l === "landing" ? "landing" : ""} ${on ? "on" : ""} ${lit.has(n) ? "lit" : ""}" data-node="${esc(n)}" data-landing="${l === "landing" ? 1 : ""}" title="${esc(title)}" aria-pressed="${on}">
           <span class="nm">${esc(name)}</span>
-          <span class="ct">${t.columns != null ? `<span>${esc(t.columns)} columns</span>` : "<span>source files</span>"}${issues ? `<span class="flag-n">${issues} to review</span>` : ""}</span>
+          <span class="ct">${t.columns != null ? `<span>${esc(t.columns)} columns</span>` : "<span>source files</span>"}${issues ? `<span class="flag-n">${issues} to review</span>` : ""}${nodeSens(t)}</span>
         </button>`;
       }).join("")}
     </div>`).join("");
   drawEdges();
+}
+function nodeSens(t) {   // tables holding personal data: PII wins over PII-derived
+  const p = +t.pii_columns || 0, d = +t.pii_derived_columns || 0;
+  if (!p && !d) return "";
+  const lvl = p ? "pii" : "pii_derived", what = [p ? `${p} with personal data` : "", d ? `${d} with hashed or masked personal data` : ""].filter(Boolean).join(", ");
+  return `<span class="sens sens-${lvl}" title="Columns: ${esc(what)}">${SENS[lvl][0]}<span class="sr">: ${esc(what)}</span></span>`;
 }
 function drawEdges() {
   const map = $("map"), svg = map.querySelector("svg");
@@ -492,6 +522,7 @@ function renderMenus() {
     </details>`;
   }).join("");
 }
+const piiOnly = () => { const f = state.filters.sensitivity; return !!f && f.size === PERSONAL.length && PERSONAL.every((v) => f.has(v)); };
 function renderChips() {
   const chips = [];
   for (const [k, set] of Object.entries(state.filters)) {
@@ -510,7 +541,8 @@ function renderChips() {
   $("reviewBtn").setAttribute("aria-pressed", String(review && !other));
   $("workBtn").setAttribute("aria-pressed", String(state.view === "worklist"));
   $("histBtn").setAttribute("aria-pressed", String(state.view === "history"));
-  for (const id of ["q", "dep", "menus", "chips"]) $(id).hidden = other;
+  $("piiBtn").setAttribute("aria-pressed", String(piiOnly()));
+  for (const id of ["q", "dep", "menus", "chips", "piiBtn"]) $(id).hidden = other;
 }
 
 /* ---------- ledger ---------- */
@@ -525,6 +557,11 @@ function flagHtml(t) {
 function srcBadge(s) {
   const draft = s === "llm" || s === "rule";
   return `<span class="src ${s === "glossary" ? "glossary" : ""} ${draft ? "draft" : ""}" title="${draft ? "Drafted automatically. Nobody has confirmed it yet." : "Where this definition comes from"}">${esc(SOURCE[s] || s || "No source")}</span>`;
+}
+function sensBadge(r, withNone = false) {
+  const v = r.sensitivity;
+  if (!v || !SENS[v] || (v === "none" && !withNone)) return "";
+  return `<span class="sens sens-${v}" title="${esc(SENS[v][1])}${r.sensitivity_reason ? `: ${esc(r.sensitivity_reason)}` : ""}">${SENS[v][0]}</span>`;
 }
 function renderRows() {
   const n = rows.length, tables = new Set(rows.map((r) => r.target_table)).size;
@@ -572,7 +609,7 @@ function rowHtml(r) {
   const isOpen = state.open === key;
   return `<li class="${isOpen ? "open" : ""}" data-key="${esc(key)}">
     <button class="line" data-row="${esc(key)}" aria-expanded="${isOpen}">
-      <span><span class="cn">${esc(r.target_column)}</span><span class="ty">${esc(r.data_type)}, ${esc((KIND[r.mapping_kind] || r.mapping_kind || "").toLowerCase())}</span></span>
+      <span><span class="cn">${esc(r.target_column)}</span>${sensBadge(r)}<span class="ty">${esc(r.data_type)}, ${esc((KIND[r.mapping_kind] || r.mapping_kind || "").toLowerCase())}</span></span>
       <span class="from">${srcs.length ? srcs.map(esc).join("<br>") : `<i>${r.mapping_kind === "constant" ? "Constant value" : "No source column"}</i>`}</span>
       <span class="def">${r.business_definition ? esc(r.business_definition) : `<span class="none">No definition yet</span>`}${srcBadge(r.definition_source)}${pendingOf(r, key) ? `<span class="pending" title="A steward decided on this column. The agent applies it on its next run.">Pending</span>` : ""}</span>
       <span class="flags">${flags.map(flagHtml).join("")}${[...new Set((issuesOf(key)).filter((i) => i.status !== "open").map((i) => i.status))].map((st) => `<span class="st ${st}" title="Status set by the owner">${STATUS[st]}</span>`).join("")}</span>
@@ -613,6 +650,7 @@ function detailHtml(r, key) {
       <h4>Steward decision</h4>${stewardHtml(r, key)}
     </div>
     <div>
+      <h4>Personal data</h4>${sensHtml(r, key)}
       <h4>Where it comes from</h4>
       ${ladderHtml(r.lineage_path)}
       <h4>Details</h4>
@@ -666,17 +704,64 @@ function stewardHtml(r, key) {
       ${inGlossary ? `<button class="btn" data-decide="remove" data-key="${esc(key)}" title="Let the agent draft the definition again">Remove from glossary</button>` : ""}
     </div>${msg}</div>`;
 }
+// An override is pending until the agent has applied it.
+function sensPending(r, key) {
+  const o = sens[key];
+  if (o && (r.sensitivity_source !== "steward" || r.sensitivity !== o.sensitivity)) return "set";
+  if (!o && r.sensitivity_source === "steward") return "removed";
+  return null;
+}
+function sensHtml(r, key) {
+  const o = sens[key], pend = sensPending(r, key);
+  const now = r.sensitivity ? `${sensBadge(r, true)} <b>${esc(SENS[r.sensitivity]?.[1] || r.sensitivity)}</b>. ${esc(SENS_SRC[r.sensitivity_source] || r.sensitivity_source || "")}.` : "Not classified yet: the next agent run classifies it.";
+  const why = r.sensitivity_reason ? `<p class="why">${esc(r.sensitivity_reason.charAt(0).toUpperCase() + r.sensitivity_reason.slice(1))}.</p>` : "";
+  const who = o ? `Set to ${esc(SENS[o.sensitivity]?.[1] || o.sensitivity)} by ${esc(o.updated_by)} on ${esc(fmtMs(Date.parse(o.updated_at)))}${o.note ? `: “${esc(o.note)}”` : ""}.` : "";
+  const status = pend === "set" ? `<p>${who} <span class="pending">Pending</span> The agent applies it on its next run, and columns downstream inherit it.</p>`
+    : pend === "removed" ? `<p>Override removed <span class="pending">Pending</span> The agent classifies the column again on its next run.</p>`
+    : o ? `<p>${who}</p>` : "";
+  const msg = sensMsg && sensMsg.key === key ? `<p class="msg ${sensMsg.err ? "err" : ""}" role="status">${esc(sensMsg.text)}</p>` : "";
+  let ctl = "";
+  if (!me) ctl = "";
+  else if (!me.steward) ctl = `<p>Only members of <code>${esc(me.group)}</code> can override it.</p>`;
+  else {
+    const cur = o ? o.sensitivity : r.sensitivity;
+    ctl = `<div class="acts" data-sensbox="${esc(key)}">
+      <label class="sr" for="sens-${esc(key)}">Personal data level</label>
+      <select id="sens-${esc(key)}" data-f-sens>${Object.entries(SENS).map(([v, [, l]]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>
+      <input data-f-sensnote placeholder="Why (optional)" aria-label="Why" maxlength="500" value="${esc(o?.note || "")}">
+      <button class="btn" data-senssave="${esc(key)}" title="Your level wins over the agent's, survives agent runs, and columns downstream inherit it">Override</button>
+      ${o ? `<button class="btn" data-sensclear="${esc(key)}" title="Let the agent classify the column again">Remove override</button>` : ""}
+    </div>`;
+  }
+  return `<div class="steward sensbox"><p class="why">${now}</p>${why}${status}${ctl}${msg}</div>`;
+}
+async function saveSens(key, level) {
+  const box = document.querySelector(`[data-sensbox="${cssEsc(key)}"]`);
+  const body = { column: key, sensitivity: level, note: level ? box?.querySelector("[data-f-sensnote]")?.value || null : null };
+  sensMsg = { key, text: "Saving…" }; renderRows();
+  try {
+    const r = await fetch("api/sensitivity", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const out = await r.json();
+    if (!r.ok) throw new Error(out.detail || r.statusText);
+    hist = null;
+    sensMsg = { key, text: (level ? "Override saved." : "Override removed.") + " Run the agent to apply it." };
+    await loadSteward();
+  } catch (e) {
+    sensMsg = { key, text: `Couldn't save: ${e.message}`, err: true }; renderRows();
+  }
+}
 async function loadSteward() {
   try { me = await getJson("api/me"); } catch (e) { me = { steward: false, group: "the stewards group", error: e.message }; }
   try { gloss = Object.fromEntries((await getJson("api/glossary?refresh=true")).rows.map((g) => [g.column_key, g])); } catch (e) { gloss = {}; }
+  try { sens = Object.fromEntries((await getJson("api/sensitivity?refresh=true")).rows.map((o) => [o.column_key, o])); } catch (e) { sens = {}; }
   renderPending();
   if (state.view === "worklist") renderWorklist(); else if (rows.length) renderRows();
 }
 function renderPending() {
-  const n = Object.keys(gloss).filter((k) => {
-    const r = rows.find((x) => `${x.target_table}.${x.target_column}` === k) || allRows[k];
-    return r && pendingOf(r, k);
-  }).length;
+  const rowOf = (k) => rows.find((x) => `${x.target_table}.${x.target_column}` === k) || allRows[k];
+  const sensKeys = new Set([...Object.keys(sens), ...Object.values(allRows).filter((r) => r.sensitivity_source === "steward").map((r) => `${r.target_table}.${r.target_column}`)]);
+  const n = Object.keys(gloss).filter((k) => rowOf(k) && pendingOf(rowOf(k), k)).length
+    + [...sensKeys].filter((k) => rowOf(k) && sensPending(rowOf(k), k)).length;
   const el = $("pendingLine");
   el.hidden = !n;
   el.innerHTML = n ? `<b>${n}</b> steward decision${n > 1 ? "s are" : " is"} waiting for the agent. Select <b>Run agent</b> to apply ${n > 1 ? "them" : "it"} to the mapping and Unity Catalog.` : "";
@@ -808,9 +893,10 @@ async function saveStatus(k, box) {
 /* ---------- history ---------- */
 const FIELD = { business_definition: "Definition", definition_source: "Definition source", transformation: "Rule",
   table_rule: "Table rule", issues: "Issues", proposed_definition: "Suggested definition", source_columns: "Sources",
-  data_type: "Type", owner: "Owner", is_active: "Active" };
+  data_type: "Type", owner: "Owner", is_active: "Active", sensitivity: "Personal data", sensitivity_source: "Personal data from" };
 const DECISION = { seeded: "Seeded from glossary.toml", definition: "Set the definition", confirmed: "Confirmed still correct",
-  removed: "Removed from the glossary", note: "Changed the note" };
+  removed: "Removed from the glossary", note: "Changed the note", sensitivity: "Overrode the personal data level",
+  sensitivity_removed: "Removed the personal data override" };
 const CHANGE = { new: "New column", updated: "Changed", removed: "Removed", restored: "Back in the pipeline" };
 async function loadHistory(refresh = false) {
   if (hist && !refresh) return hist;
@@ -828,6 +914,8 @@ function valHtml(field, v) {
   if (v == null || v === "") return `<i>none</i>`;
   if (field === "transformation" || field === "table_rule") return `<pre class="sql">${hl(v)}</pre>`;
   if (field === "definition_source") return esc(SOURCE[v] || v);
+  if (field === "sensitivity") return esc(SENS[v]?.[1] || v);
+  if (field === "sensitivity_source") return esc(SENS_SRC[v] || v);
   return esc(v);
 }
 function diffHtml(fields, kind) {
@@ -852,7 +940,9 @@ function diffHtml(fields, kind) {
 }
 function decisionHtml(d, withColumn) {
   const what = DECISION[d.action] || d.action;
-  const body = d.action === "definition" || d.action === "seeded"
+  const body = d.field === "sensitivity"
+    ? `<div class="diff"><span class="lbl">Personal data</span><div>${d.before ? `<del>${valHtml("sensitivity", d.before)}</del>` : ""}${d.after ? `<ins>${valHtml("sensitivity", d.after)}</ins>` : `<ins>the agent decides again</ins>`}</div></div>`
+    : d.action === "definition" || d.action === "seeded"
     ? `<div class="diff">${d.before ? `<span class="lbl">Definition</span><div><del>${esc(d.before)}</del><ins>${esc(d.after)}</ins></div>` : `<span class="lbl">Definition</span><div>${esc(d.after)}</div>`}</div>`
     : d.action === "removed" && d.before ? `<p class="sub">It was: “${esc(d.before)}”</p>` : "";
   return `<div class="head"><span class="kind decision">Steward</span><span class="what">${esc(what)}</span>${withColumn ? colRef(d.column) : ""}</div>
@@ -1052,6 +1142,14 @@ document.addEventListener("click", (e) => {
     else if (k === "depends_on") { state.depends_on = ""; $("dep").value = ""; }
     else toggle(k, t.dataset.v, false);
     update();
+  } else if (t.dataset.senssave) {
+    const box = t.closest("[data-sensbox]");
+    saveSens(t.dataset.senssave, box.querySelector("[data-f-sens]").value);
+  } else if (t.dataset.sensclear) {
+    saveSens(t.dataset.sensclear, null);
+  } else if (t.id === "piiBtn") {
+    if (piiOnly()) delete state.filters.sensitivity; else state.filters.sensitivity = new Set(PERSONAL);
+    state.view = "ledger"; update();
   } else if (t.dataset.savestatus) {
     saveStatus(t.dataset.savestatus, t.closest("[data-issue]"));
   } else if (t.dataset.seen) {

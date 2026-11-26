@@ -1,10 +1,11 @@
 # STTM agent on a synthetic medallion (Databricks Free Edition)
 
-A small, reproducible proof of concept. It covers four things:
+A small, reproducible proof of concept. It covers these things:
 
 - **Medallion.** A synthetic online-retail medallion (bronze → silver → gold), built as one serverless Lakeflow Declarative Pipeline.
 - **STTM.** A source-to-target mapping with one row per target column: source columns, transformation, type, business definition, owner, layer and lineage path back to bronze. It is kept as a Delta table, flattened into a second table (`sttm_export`, same columns as the CSV) and exported to [`output/sttm.csv`](output/sttm.csv) and [`output/sttm.md`](output/sttm.md).
 - **Agent.** It reads the deployed pipeline SQL plus Unity Catalog (UC) metadata and lineage. It drafts missing definitions with a Foundation Model API LLM and writes them back as **column comments and tags**. It also flags gaps and conflicts.
+- **Personal data.** Every column is classified `pii`, `pii_derived` or `none`: by name at bronze (rules, then the LLM for undecided names; no data values are read), then down the lineage, with steward overrides. The level goes to the STTM and to a `sttm_sensitivity` column tag ([personal data](#personal-data-sensitivity)).
 - **Incremental updates.** Both the data and the metadata are refreshed incrementally. The [answer](#incremental-updates-the-answer) comes with evidence from a demo run.
 - **Viewer app.** A small web app over `sttm_export` with filters and impact analysis. Stewards approve definitions in it, and owners work through the issues on their tables, with an email from a SQL alert when an agent run finds new ones. A History tab shows who changed what and when, and **Download for audit** saves it all as an Excel workbook. It runs locally or as a Databricks App ([viewer app](#viewer-app)).
 
@@ -49,7 +50,7 @@ sttm_silver   customers_cleansed   streaming table: casts, renames, initcap/lowe
 sttm_gold     customer_360         MV: customers LEFT JOIN per-customer order aggregates
               daily_sales          MV: orders ⋈ products ⋈ customers, filtered, grouped by day/category/country
 sttm_meta     sttm, sttm_export, table_fingerprints, uc_lineage, agent_state, agent_runs, pipeline_event_log,
-              glossary, owners, issues, issue_status
+              glossary, sensitivity_overrides, owners, issues, issue_status
 ```
 
 | Path | Role |
@@ -60,6 +61,7 @@ sttm_meta     sttm, sttm_export, table_fingerprints, uc_lineage, agent_state, ag
 | [`sttm/medallion.py`](sttm/medallion.py) | Schemas, volume, file landing, pipeline deploy/run, and event-log metrics. |
 | [`sttm/sqlparse.py`](sttm/sqlparse.py) | Lakeflow SQL → per-column expression and sources (sqlglot), plus table rules (joins, filters, dedup, grain, AUTO CDC). |
 | [`sttm/agent.py`](sttm/agent.py) | The agent: change detection, definitions, checks, MERGE, write-back, export. |
+| [`sttm/sensitivity.py`](sttm/sensitivity.py) | Personal data: name rules, the LLM check for undecided names, propagation down the lineage, steward overrides. |
 | [`run.py`](run.py) | The CLI above, including the demo. |
 | [`app/`](app) | The viewer app: FastAPI ([`app.py`](app/app.py)) and one static page ([`static/index.html`](app/static/index.html)), plus [`app.yaml`](app/app.yaml) for Databricks Apps. [`history.py`](app/history.py) reads the audit history from change data feed; [`audit.py`](app/audit.py) builds the Excel workbook. |
 
@@ -75,6 +77,7 @@ sttm_meta     sttm, sttm_export, table_fingerprints, uc_lineage, agent_state, ag
 | `table_rule`, `rule_columns` | Rules that change every column of the table: joins, `WHERE` filters, `QUALIFY` dedup, `GROUP BY` grain, AUTO CDC keys and sequencing. `rule_columns` lists the columns those rules read (join keys, filter flags, dedup order), so a change to them reaches every column of the table. |
 | `business_definition`, `definition_source` | See [definitions](#how-definitions-are-chosen). |
 | `owner` | From `glossary.toml` (`[owners]`, by layer or by table). |
+| `sensitivity`, `sensitivity_source`, `sensitivity_reason` | Personal data level (`pii`, `pii_derived`, `none`), where it comes from (`rule`, `llm`, `inherited`, `steward`) and why, for example "carries the value of silver.customers.full_name (pii)". See [personal data](#personal-data-sensitivity). |
 | `lineage_path`, `bronze_sources` | Recursive walk back to bronze and the landed files, for example `gold.customer_360.lifetime_value_eur <- silver.orders.{is_cancelled, net_amount_eur} <- bronze.orders_raw.{currency, discount_amt, qty, status, unit_price} <- landing/orders.{…}`. |
 | `lineage_origin` | `sql`, `sql, uc table-confirmed` (UC table lineage confirms every source table), or `sql+uc column` (UC column lineage agrees). |
 | `issues` | `GAP` (no source column), `CONFLICT` (definition contradicts the SQL), `REVIEW` (an upstream rule changed under a curated definition), `FIX IN PIPELINE SQL`, `LINEAGE` (UC and SQL disagree), `INFO` (technical columns). |
@@ -104,12 +107,71 @@ Highest priority first:
 
 Definitions from sources 1–3 are **checked** against the transformation by the same LLM, acting as a judge with the upstream expressions resolved. The check runs only when the definition or anything upstream changed.
 
+### Personal data (sensitivity)
+
+Three levels, as agreed: `pii` (identifies a person or is about one), `pii_derived` (hashed, masked or partial PII) and `none`. Finer categories (contact, financial, special category) are not tracked yet. The code is in [`sttm/sensitivity.py`](sttm/sensitivity.py) and [`sttm/sqlparse.py`](sttm/sqlparse.py) (`flows`).
+
+**1. Bronze: classified by column name, never by data.** The agent reads no rows and sends no values anywhere.
+
+| Step | What decides | Examples in this medallion |
+|---|---|---|
+| PII rules | email, person name (`first_nm`, `full_name`), phone, address, birth date, national or tax id, bank or card number, IP or device id, **person identifiers** (`cust_id`, `customer_id`, `user_id`), special-category words | `email_addr`, `first_nm`, `last_nm`, `cust_id` → `pii` |
+| Undecided names → LLM | Names with `name`, `country`, `city`, `description`, `notes`, … that the rules can't decide. The LLM (same endpoint as the definitions) gets the table name and comment and the column names and types only, and answers `pii`, `pii_derived` or `none` with a reason. One call per run at most, and only for names it has not answered before. | `product_name` → `none` ("describes an item, not a person"), `country_cd` → `none` ("does not identify an individual") |
+| Non-personal rules | measures (`qty`, `price`, `amount`), codes and categories (`status`, `currency`, `tier`), product and order references, event timestamps | `qty`, `status`, `signup_dt`, `order_ts` → `none` |
+| Technical columns | `_source_file`, `_ingested_at` → `none`. `_rescued_data` can hold any field of the record that did not match the schema, so it gets the table's most sensitive level. | `customers_raw._rescued_data` → `pii` |
+
+Without an LLM (`STTM_LLM_ENDPOINT=none`) or if the call fails, undecided names fall back to `none` with that reason, so a steward should look at them.
+
+A customer id counts as `pii`: a pseudonymous identifier is still personal data under the GDPR (Recital 26), because it can be linked back to the person. That is why `silver.orders.customer_id` is `pii` too. A steward can override it per column if your policy says otherwise.
+
+**2. Silver and gold: inherited down the lineage.** For each target column, the parser records how each source column's *value* reaches it, walking the sqlglot lineage through CTEs and aliases. Along one path the weakest step wins; across paths from the same source, the strongest path wins.
+
+| How the value reaches the column | Effect | Examples |
+|---|---|---|
+| Copied or transformed: cast, trim, `lower`, `concat`, arithmetic, `datediff`, `MIN`/`MAX`, a simple `CASE x WHEN … THEN …` recode | Keeps the source's level | `full_name = concat_ws(' ', initcap(first_nm), initcap(last_nm))` → `pii` |
+| Hashed, masked or cut to a part: `sha2`, `sha`/`sha1`, `md5`, `hash`, `xxhash64`, `crc32`, `mask`, `aes_encrypt`, `substring`/`substr`, `left`, `right`, `split_part`, `regexp_extract` | `pii` becomes `pii_derived` | `sha2(email, 256)`, `split_part(email, '@', 2)` → `pii_derived` |
+| Only an aggregate or a yes/no survives: `COUNT`, `SUM`, `AVG`, `COUNT_IF`, `STDDEV`, `length`, comparisons, `IN`, `LIKE`, `IS NULL`, searched `CASE WHEN <condition>`, the `FILTER (WHERE …)` and `OVER (…)` parts | `none` | `count(DISTINCT email)`, `email IS NOT NULL` → `none` |
+| Boolean columns (flags) and constants | `none` | `is_cancelled`, `report_currency` |
+
+The most sensitive source wins. Join keys, `WHERE` filters and dedup columns (`rule_columns`) pick rows but do not carry values, so they don't count. `mapping_kind` and the parsed expression are the inputs; a source that only UC lineage knows is treated as copied. The synthetic cases above (`sha2`, `md5`, `mask`, `substring`, `split_part`, `count(DISTINCT email)`, `min(full_name)`, `avg(length(full_name))`, a searched and a simple `CASE`) were checked against the parser offline, because the medallion itself has no hashed column.
+
+**3. Steward overrides win.** A steward can set the level of any column in the viewer app. The override is stored in `<prefix>_meta.sensitivity_overrides` (`column_key`, `sensitivity`, `note`, `updated_by`, `updated_at`, change data feed on) and written as the signed-in user, like glossary decisions. The next agent run uses it for that column, and columns downstream inherit it. It stays until a steward removes it.
+
+I picked a separate table over a `sensitivity` field in `glossary`:
+- A definition and a privacy level are independent decisions. Each needs its own `updated_by` and `updated_at`, and its own history.
+- *Remove from glossary* deletes the glossary row. A privacy override must not disappear with it.
+- It can get its own grants, for example a privacy-officer group with `MODIFY` on overrides only. Today the stewards group has `MODIFY` on both.
+
+**Change detection.** Overrides count in each table's `glossary_hash`, so changing one reprocesses that table and its downstream tables. Rows written before this feature (with no `sensitivity`) make their tables run once (`sensitivity backfill`), so no `--full` run is needed after upgrading.
+
+Measured in this workspace:
+- **Backfill run:** 9 tables, 84 rows updated, 84 tag sets written, 1 LLM call for 2 names, 0 definitions changed, 75 s. The next run touched nothing: 0 tables, 0 LLM calls, 41 s.
+- **Result:**
+  - `email` is `pii` in bronze (`email_addr`), `silver.customers_cleansed` and `silver.customers`. The gold SQL doesn't select it.
+  - `full_name` is `pii` from `first_nm`/`last_nm` through both silver tables to `gold.customer_360`.
+  - Every `gold.daily_sales` column is `none`: `orders`, `units`, `revenue_eur` and `gross_margin_eur` are aggregates of non-personal columns. `customer_id` is only a join key there.
+  - `customer_360.order_count` and `lifetime_value_eur` are `none`.
+  - 16 columns in 6 tables are `pii`.
+- **Override, locally:** setting `bronze.customers_raw.signup_dt` to `pii` ("Signup date plus country can single out a customer") changed 4 rows: `signup_dt`, `signup_date` in both silver tables, and `gold.customer_360.active_span_days`, which is `datediff(last_order_date, signup_date)`. Their tags changed in UC too. The next run was a no-op, and the override stayed.
+- **Override, in the deployed app:** removing it, running the agent job, setting it again, running the job, then running the job once more gave 4 rows back to `none`, 4 rows to `pii`, then 0 changes. Each job run took 110–120 s. The stored row has the signed-in user as `updated_by`. The app's service principal has only `SELECT` on the table, and `sttm-stewards` has `SELECT` and `MODIFY`.
+
 ### Write-back
 
 The agent writes only what differs from UC:
 
 - **Comments:** `COMMENT ON COLUMN` for glossary, LLM and rule definitions.
-- **Tags:** `ALTER TABLE … ALTER COLUMN … SET TAGS` for `sttm_layer`, `sttm_owner`, `sttm_definition_source`, `sttm_rule_hash` and `sttm_comment_hash`.
+- **Tags:** `ALTER TABLE … ALTER COLUMN … SET TAGS` for `sttm_layer`, `sttm_owner`, `sttm_definition_source`, `sttm_rule_hash`, `sttm_comment_hash` and `sttm_sensitivity` (`pii`, `pii_derived` or `none`).
+
+`sttm_sensitivity` is a free-form tag: any user who can tag the column can change its value, and Unity Catalog doesn't enforce the allowed values. The production path is a **governed tag** with a **tag policy**:
+- The policy limits the allowed values to `pii`, `pii_derived` and `none`.
+- Only users or service principals with the `ASSIGN` permission on the tag can set it.
+- [ABAC](https://docs.databricks.com/aws/en/data-governance/unity-catalog/abac/) policies can then mask every column that carries the tag. In the docs' words, governed tags "are used in policy conditions to identify which data a policy should protect".
+
+Governed tags are account-level objects ([governed tags](https://docs.databricks.com/aws/en/admin/governed-tags/), up to 1,000 per account and 500 allowed values per tag). Free Edition has "no access to the account console or account-level APIs" ([limitations](https://docs.databricks.com/aws/en/getting-started/free-edition-limitations)). Creating one would also be an account-wide change, so I did not try it here. The docs pages I read don't name a pricing tier.
+
+Databricks [data classification](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-classification) is the platform's own scanner: an agent that tags columns with `class.*` system tags such as `class.email_address`. Unlike this agent, it evaluates the data itself, and its results can include sample values. On a paid workspace, the agent could read those tags as one more input next to its name rules.
+
+Tag limits ([tags](https://docs.databricks.com/aws/en/database-objects/tags)): 50 tags per column, 1,000 column tags per table, keys and values up to 256 characters. Each column gets at most 6 `sttm_*` tags. "Tag data is stored as plain text and may be replicated globally", so tags hold levels, never values.
 
 Statements for different tables run in parallel. Statements for the same table run one after another, because concurrent `ALTER`s on one pipeline table fail with `PIPELINE_FAILED_TO_UPDATE_UC_TABLE_DUE_TO_CONCURRENT_UPDATE`. Everything can be read back with:
 
@@ -195,6 +257,7 @@ The run log is also in `sttm_meta.agent_runs`: one row per run, with counts, the
 | **Needs review** / **Issue type** | The review worklist: every column with an open issue, or one type (`CONFLICT`, `REVIEW`, `GAP`, `FIX IN PIPELINE SQL`, `LINEAGE`, `INFO`). |
 | **Depends on** | Impact analysis: everything downstream of a column or a table, through sources and table rules. For example, `silver.orders.is_cancelled` returns 12 gold columns, because `daily_sales` filters on it. |
 | **Definition source** | `glossary`, `pipeline_sql`, `uc_comment`, `inherited`, `llm`, `rule`. `llm` shows what nobody has curated yet. |
+| **Contains personal data** (button) / **Personal data** / **Personal data from** | Columns that are `pii` or `pii_derived` (the count is on the button), one level, or how the level was decided (`rule`, `llm`, `inherited`, `steward`). |
 | **Layer**, **Owner** | Who has to review what. |
 | **Mapping kind** | `direct`, `derived`, `constant`, `technical`. |
 | **Lineage origin** | How well the lineage is backed: SQL only, or confirmed by UC. |
@@ -204,7 +267,10 @@ The run log is also in `sttm_meta.agent_runs`: one row per run, with counts, the
 
 Tables start collapsed. Each heading shows the column count, how many columns need review, and the owner. Click a heading to expand it, or use **Expand all tables**. A table expands on its own when you select it in the map or jump to one of its columns.
 
+Columns that hold personal data have a **PII** badge (filled) or a **PII-derived** badge (dashed) next to their name. The badge's tooltip gives the reason. In the lineage map, tables with such columns carry the same badge, with the counts in the tooltip. The level is always written out, so colour is never the only signal.
+
 Clicking a row shows:
+- **Personal data**: the level, how it was decided and why. Stewards can **Override** it, with an optional note, or **Remove override**. An override shows as **Pending** until the next agent run applies it, and the masthead counts it with the other pending decisions;
 - the transformation and table rule, with SQL highlighting, and the columns the rule reads;
 - the lineage path, one rung per hop back to the landed files;
 - the issues, and the suggested definition with a copy button;
@@ -234,7 +300,7 @@ The command:
    - the agent job (`agent-job`, *Can manage run*).
 
    [`app.yaml`](app/app.yaml) passes them to the app as `DATABRICKS_WAREHOUSE_ID` and `STTM_JOB_ID`.
-3. Grants the app's service principal read access to seven tables only: `USE CATALOG` on the catalog, `USE SCHEMA` on `sttm_meta`, and `SELECT` on `sttm_export`, `sttm` (for the History tab, see [history](#history-and-download-for-audit)), `agent_runs`, `glossary`, `owners`, `issues` and `issue_status`. It grants the stewards group (`STTM_STEWARDS_GROUP`, default `sttm-stewards`) `SELECT` and `MODIFY` on `glossary` and `issue_status`, grants every member of an owner team `SELECT` and `MODIFY` on `issue_status`, and turns on user authorization for the app with the `sql` scope.
+3. Grants the app's service principal read access to eight tables only: `USE CATALOG` on the catalog, `USE SCHEMA` on `sttm_meta`, and `SELECT` on `sttm_export`, `sttm` (for the History tab, see [history](#history-and-download-for-audit)), `agent_runs`, `glossary`, `sensitivity_overrides`, `owners`, `issues` and `issue_status`. It grants the stewards group (`STTM_STEWARDS_GROUP`, default `sttm-stewards`) `SELECT` and `MODIFY` on `glossary`, `sensitivity_overrides` and `issue_status`, grants every member of an owner team `SELECT` and `MODIFY` on `issue_status`, and turns on user authorization for the app with the `sql` scope.
 4. Creates or updates one SQL alert per owner team in `/Workspace/Users/<you>/sttm-agent/alerts`, and adds one alert task per team to the agent job (see [notifications](#owners-worklist-and-notifications)).
 5. Uploads `app/` to `/Workspace/Users/<you>/sttm-agent/app` and deploys it. It prints the app URL. Viewers sign in with their Databricks account and need *Can use* on the app.
 
@@ -325,7 +391,7 @@ Limits:
 **History** (the fourth button next to *My worklist*, or `?view=history`) lists, newest first:
 
 - **Agent runs:** when, who started it (`details.requested_by`), the tables processed and why, how many columns were new, updated or removed, and the issues opened and closed. *Show what changed* lists each changed column with its definition, rule (transformation), table rule, issues and definition source **before and after**. Runs that changed nothing are hidden behind a link.
-- **Steward decisions** (set or edited a definition, confirmed "still correct", removed from the glossary) and **issue status changes** (status, assignee, comment), each with the person who made it.
+- **Steward decisions** (set or edited a definition, confirmed "still correct", removed from the glossary, overrode or stopped overriding the personal data level) and **issue status changes** (status, assignee, comment), each with the person who made it. A run's column changes include `sensitivity` and `sensitivity_source` before and after.
 
 The column detail has the same story for one column under *History of this column*: what the agent changed on it, the issues it opened and closed, and the decisions and statuses, in time order.
 
@@ -335,26 +401,26 @@ Everything is read from [change data feed](https://docs.databricks.com/aws/en/de
 |---|---|---|
 | Column changes of a run | `table_changes('<cat>.sttm_meta.sttm', …)`, `update_preimage` / `update_postimage` pairs, for the commit versions in (`details.sttm_version_before`, `sttm_version`]. Runs logged before this was recorded use the previous run's `sttm_version`, which is the same thing because only the agent writes `sttm`. | `agent_runs.details.requested_by` |
 | Issues opened and closed | `issues` CDF (`is_open` false → true and back) | the agent |
-| Steward decisions | `glossary` CDF | `updated_by` (`current_user()` when the row was written). A removed row keeps no `updated_by`, so the app takes the commit's `userName` from [`DESCRIBE HISTORY`](https://docs.databricks.com/aws/en/sql/language-manual/delta-describe-history). |
+| Steward decisions | `glossary` and `sensitivity_overrides` CDF | `updated_by` (`current_user()` when the row was written). A removed row keeps no `updated_by`, so the app takes the commit's `userName` from [`DESCRIBE HISTORY`](https://docs.databricks.com/aws/en/sql/language-manual/delta-describe-history). |
 | Issue statuses | `issue_status` CDF | `updated_by` |
 
 `table_changes` needs only `SELECT` on the table, so the app's service principal stays read-only: `app-deploy` adds `SELECT` on `sttm` to its grants, and it already read the other three tables. `DESCRIBE HISTORY` also worked as the service principal.
 
-**Retention.** Change data is only readable while the table keeps its files and log. On Unity Catalog managed tables, [predictive optimization](https://docs.databricks.com/aws/en/optimizations/predictive-optimization) runs `VACUUM` automatically, which deletes change files older than `delta.deletedFileRetentionDuration` (default 7 days), and table history is kept for 30 days by default. The agent therefore sets `delta.deletedFileRetentionDuration` and `delta.logRetentionDuration` to `STTM_HISTORY_RETENTION_DAYS` (default 30) on `sttm`, `glossary`, `issues` and `issue_status`, and only on those (`ensure_meta`, so `setup`, `agent` and `app-deploy` apply it; safe to re-run). If the oldest versions are gone anyway, the history starts at the oldest readable version and the page says so.
+**Retention.** Change data is only readable while the table keeps its files and log. On Unity Catalog managed tables, [predictive optimization](https://docs.databricks.com/aws/en/optimizations/predictive-optimization) runs `VACUUM` automatically, which deletes change files older than `delta.deletedFileRetentionDuration` (default 7 days), and table history is kept for 30 days by default. The agent therefore sets `delta.deletedFileRetentionDuration` and `delta.logRetentionDuration` to `STTM_HISTORY_RETENTION_DAYS` (default 30) on `sttm`, `glossary`, `sensitivity_overrides`, `issues` and `issue_status`, and only on those (`ensure_meta`, so `setup`, `agent` and `app-deploy` apply it; safe to re-run). If the oldest versions are gone anyway, the history starts at the oldest readable version and the page says so.
 
 **Download for audit** (masthead) builds an `.xlsx` in the app with [openpyxl](https://openpyxl.readthedocs.io/). It respects the filters on screen (table, layer, issue type, search, *depends on*, …):
 
 | Sheet | Content |
 |---|---|
-| Cover | When (UTC), who generated it (the signed-in user), the source table, the filters, the current Delta version of `sttm`, `sttm_export`, `glossary`, `issue_status` and `issues`, the latest agent run and the `sttm` version it wrote, and counts: columns, tables, columns to review, open issues by status, definitions by source. |
-| One per table | The rows of that table, with the same columns as `sttm_export` / the CSV. |
+| Cover | When (UTC), who generated it (the signed-in user), the source table, the filters, the current Delta version of `sttm`, `sttm_export`, `glossary`, `sensitivity_overrides`, `issue_status` and `issues`, the latest agent run and the `sttm` version it wrote, and counts: columns, tables, columns to review, open issues by status, definitions by source, columns by personal data level. |
+| One per table | The rows of that table, with the same columns as `sttm_export` / the CSV, including `sensitivity`, `sensitivity_source` and `sensitivity_reason`. With **Contains personal data** on, the workbook is an inventory of the personal data columns. |
 | Open issues | Open issues on those columns, with status, assignee, comment, who set it and when. |
 | Recent history | The last `STTM_AUDIT_HISTORY_DAYS` (default 30) days, one line per changed field: agent runs, column changes, issues opened and closed, steward decisions and statuses. With filters, only lines for the filtered columns (runs are always listed). |
 
 Text that starts with `=`, `+`, `-` or `@` is stored as text, never as a formula.
 
 Measured in this workspace (19 runs, 190 column changes, 8 decisions, 8 status changes):
-- `/api/history` takes 2.8 s locally and 4.6 s in the deployed app on a warm warehouse. Its seven statements (five change feeds, `agent_runs`, versions) run in parallel. Results are cached for 60 s like the rest; a decision or a status change clears the cache.
+- `/api/history` takes 2.8 s locally and 4.6 s in the deployed app on a warm warehouse. Its statements (the change feeds, `agent_runs`, versions; eight since personal data was added) run in parallel. Results are cached for 60 s like the rest; a decision or a status change clears the cache.
 - The full workbook is 80 KB (12 sheets, 260 history lines); filtered to gold it is 20–25 KB. It builds in about 2.7 s.
 - Verified in History, locally and in the deployed app: the `silver.products.category` cycle (LLM draft → human UC comment "Product category as shown in the web shop menu." → comment cleared, new LLM draft), the phase A decisions (`order_count` edited, `avg_order_value_eur` and `orders` set, `order_date` confirmed) and the phase B statuses. A status set and reset in the deployed app appeared with the signed-in user as `updated_by`, and the next job run (102 s, `requested_by=phase-c-test`) recorded `sttm_version_before`.
 - The UI was tested with jsdom against both the local and the deployed app (History tab, run details, column timeline, filtered download).
@@ -382,12 +448,13 @@ Limits:
 - **Compute and scale.** Classic compute, bigger and multiple warehouses, more than one active pipeline per type, and no daily quota shutdown. Free Edition stops compute for the day when the quota is exceeded.
 - **Models.** Provisioned-throughput and custom model serving, and the full model catalogue. Free Edition excludes some models, including the hosted Claude models listed in the docs.
 - **Account-level features.** Account console and APIs, SSO/SCIM, and multiple workspaces and metastores. These matter if lineage and metadata must span workspaces.
-- **Governance.** On paid tiers, governed tags with tag policies and ABAC work alongside the free-form tags used here.
+- **Governance.** Governed tags with tag policies (fixed values, `ASSIGN` permission), ABAC column masks by tag, and Databricks data classification. They would replace or back the free-form `sttm_sensitivity` tag; see [write-back](#write-back).
 - **Not tested here: column lineage.** Whether paid tiers capture pipeline column lineage with sources (instead of target-only events) was not tested. The docs describe column lineage for pipelines on DBR 13.3+ without a tier caveat.
 
 ## Limitations and next steps
 
 - **LLM drafts are drafts.** Each draft is verified by a second judge call and fixed when it disagrees, but a few still over-generalise, for example "includes all customers…". They are tagged `sttm_definition_source=llm`. Approving it in the viewer app makes it governed, and the next run rewrites only that column.
+- **Personal data by name only.** The agent never looks at values, so a column with a misleading name (`notes` holding emails) is only caught if the LLM or a steward flags it. `regexp_replace` counts as a copy, because it may clean a value as well as mask it. Free-text columns and quasi-identifiers (country, dates, age) are `none` unless a steward says otherwise. Data classification on a paid workspace would cover the value side.
 - **Parser coverage.** It covers the SQL constructs used here: CTEs, joins, `QUALIFY`, aggregate `FILTER`, AUTO CDC and `read_files`. Python pipelines and UDFs are not parsed; there, UC column lineage would be the only source.
 - **Table comments.** These are not yet checked; for example, the `daily_sales` table comment still says "excluding cancelled and returned".
 - **History is bounded by retention.** See [History and Download for audit](#history-and-download-for-audit).

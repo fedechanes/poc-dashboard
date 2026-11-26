@@ -9,11 +9,13 @@ Real environment variables win over the file.
   STTM_PREFIX            schema prefix (default: sttm -> sttm_landing, sttm_bronze, ...)
   STTM_PIPELINE_NAME     Lakeflow pipeline name (default: sttm-medallion)
   STTM_PIPELINE_ID       pipeline id when there is no sttm_state.json (the agent job passes it as --pipeline-id)
-  STTM_LLM_ENDPOINT      chat endpoint for drafting definitions (default: databricks-qwen3-next-80b-a3b-instruct,
+  STTM_LLM_ENDPOINT      chat endpoint for drafting definitions and checking undecided bronze column names for
+                         personal data (default: databricks-qwen3-next-80b-a3b-instruct,
                          'none' = deterministic rule-based fallback, no LLM)
   STTM_DEFAULT_OWNER     user name (email) that every owner team in glossary.toml maps to when it is first added to
                          the owners table (default: the user running the agent or the deploy)
-  STTM_HISTORY_RETENTION_DAYS  days the change data feed of sttm, glossary, issues and issue_status stays readable
+  STTM_HISTORY_RETENTION_DAYS  days the change data feed of sttm, glossary, sensitivity_overrides, issues and
+                         issue_status stays readable
                          for the viewer's History (default 30; sets delta.deletedFileRetentionDuration)
 
 Workspace-specific ids (pipeline id, warehouse id, host) live in sttm_state.json (gitignored).

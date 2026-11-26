@@ -6,6 +6,8 @@ For every dataset the pipeline defines we get:
   - table-level rules: dedup (QUALIFY), filters (WHERE), grain (GROUP BY), joins, AUTO CDC keys
   - per target column: the expression, the source columns it reads, and "context" columns
     (filters/joins/dedup keys that change the result without being projected)
+  - per target column and source: how the source's value reaches the target (`flows`: copy, mask or drop), which the
+    agent uses to propagate sensitivity (PII) down the lineage
 
 sqlglot resolves the column lineage through CTEs, aliases and `SELECT *`, given the table schemas from UC.
 """
@@ -30,6 +32,7 @@ class ColumnMap:
     expression: str                       # how the column is computed (with intermediate steps)
     sources: list[str] = field(default_factory=list)   # "catalog.schema.table.column" or "<files>:<path>.<field>"
     kind: str = "derived"                 # direct | derived | constant | technical
+    flows: dict[str, str] = field(default_factory=dict)   # source -> copy | mask | drop (strongest path wins)
 
 
 @dataclass
@@ -250,7 +253,7 @@ def map_columns(ds: Dataset, target_cols: list[str], schema: dict) -> None:
                          f"latest by {ds.cdc['sequence_by']}")
         ds.context_columns = [f"{src}.{k}" for k in ds.cdc["keys"] + [ds.cdc["sequence_by"]]]
         for c in target_cols:
-            ds.columns[c] = ColumnMap(c, c, [f"{src}.{c}"], "direct")
+            ds.columns[c] = ColumnMap(c, c, [f"{src}.{c}"], "direct", {f"{src}.{c}": "copy"})
         return
     if not ds.query:
         return
@@ -297,7 +300,9 @@ def map_columns(ds: Dataset, target_cols: list[str], schema: dict) -> None:
             kind = "direct"
         else:
             kind = "derived"
-        ds.columns[c] = ColumnMap(c, expr, sorted(sources), kind)
+        flows: dict[str, str] = {}
+        _flows(node, "copy", flows)
+        ds.columns[c] = ColumnMap(c, expr, sorted(sources), kind, flows)
 
 
 def _find_read_files(tree: exp.Expression):
@@ -305,3 +310,75 @@ def _find_read_files(tree: exp.Expression):
         if f.name.lower() == "read_files":
             return f
     return None
+
+
+# ---------------------------------------------------------------------------------------------------- value flows
+# How each source column's *value* reaches a target column, for sensitivity propagation. Along one path the weakest
+# step wins (drop < mask < copy); across several paths from the same source the strongest path wins.
+#   copy: the value survives, possibly transformed (cast, trim, lower, concat, arithmetic, MIN/MAX, a CASE recode)
+#   mask: hashed, masked or cut to a part (sha2, md5, mask, substring, split_part, ...)
+#   drop: only an aggregate or a yes/no survives (COUNT/SUM/AVG, comparisons, filters, searched CASE conditions)
+FLOW_RANK = {"drop": 0, "mask": 1, "copy": 2}
+DROP_FUNCS = {"count", "countif", "sum", "avg", "approxdistinct", "approxcountdistinct", "stddev", "stddevpop",
+              "stddevsamp", "variance", "variancepop", "corr", "covarpop", "covarsamp", "length", "arraysize",
+              "bitlength", "octetlength", "rownumber", "rank", "denserank", "percentrank", "ntile", "exists"}
+MASK_FUNCS = {"sha2", "sha", "sha1", "md5", "md5digest", "hash", "xxhash64", "crc32", "mask", "aes_encrypt",
+              "try_aes_encrypt", "substring", "substr", "left", "right", "splitpart", "regexpextract"}
+PARTIAL_FUNCS = {"substring", "substr", "left", "right", "splitpart", "regexpextract", "sha2", "aes_encrypt",
+                 "try_aes_encrypt"}   # only the first argument carries the value (the rest are positions, keys, ...)
+
+
+def _fname(e: exp.Expression) -> str:
+    return e.name.lower() if isinstance(e, exp.Anonymous) else e.key
+
+
+def _weaker(a: str, b: str) -> str:
+    return a if FLOW_RANK[a] <= FLOW_RANK[b] else b
+
+
+def _flows(node, eff: str, out: dict[str, str]) -> None:
+    """Follow one sqlglot lineage node down to the base-table columns, recording the effect on each."""
+    if isinstance(node.source, exp.Table) and not node.downstream:
+        key = f"{_table_name(node.source)}.{node.name.split('.')[-1].lower()}"
+        if key not in out or FLOW_RANK[eff] > FLOW_RANK[out[key]]:
+            out[key] = eff
+        return
+    expr = node.expression.this if isinstance(node.expression, exp.Alias) else node.expression
+    kids = {k.name.lower(): k for k in node.downstream}
+    _walk(expr, eff, kids, out)
+
+
+def _walk(e: exp.Expression, eff: str, kids: dict, out: dict[str, str]) -> None:
+    if isinstance(e, exp.Column):
+        k = kids.get(f"{e.table}.{e.name}".lower()) or kids.get(e.name.lower())
+        if k is not None:
+            _flows(k, eff, out)
+        return
+    name = _fname(e)
+    if isinstance(e, (exp.Predicate, exp.Not, exp.Connector)) or name in DROP_FUNCS:
+        eff = "drop"
+    elif name in MASK_FUNCS:
+        eff = _weaker(eff, "mask")
+    if isinstance(e, exp.Case):
+        # simple CASE x WHEN 'G' THEN 'Gold': a recode, x's value survives. Searched CASE WHEN <cond>: only a yes/no.
+        children = [e.this] if e.this is not None else []
+        children += [i.args.get("true") for i in e.args.get("ifs") or []] + [e.args.get("default")]
+        for i in e.args.get("ifs") or []:
+            if e.this is None and i.this is not None:
+                _walk(i.this, "drop", kids, out)
+    elif isinstance(e, exp.If):
+        children = [e.args.get("true"), e.args.get("false")]
+        if e.this is not None:
+            _walk(e.this, "drop", kids, out)
+    elif isinstance(e, (exp.Filter, exp.Window)):
+        children = [e.this]   # the FILTER (WHERE ...) / OVER (...) parts only choose rows
+        for part in e.iter_expressions():
+            if part is not e.this:
+                _walk(part, "drop", kids, out)
+    elif name in PARTIAL_FUNCS:
+        children = [e.this]
+    else:
+        children = list(e.iter_expressions())
+    for c in children:
+        if c is not None:
+            _walk(c, eff, kids, out)

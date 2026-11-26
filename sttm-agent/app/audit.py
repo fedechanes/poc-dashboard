@@ -1,7 +1,8 @@
 """'Download for audit': the STTM as an Excel workbook (openpyxl), built in the app.
 
-Sheets: Cover (when, who, table versions, counts, filters), one sheet per table with the export's columns, Open issues
-with the owners' statuses, and Recent history (agent-run changes, steward decisions, status changes).
+Sheets: Cover (when, who, table versions, counts incl. personal data levels, filters), one sheet per table with the
+export's columns (sensitivity included), Open issues with the owners' statuses, and Recent history (agent-run changes,
+steward decisions and sensitivity overrides, status changes).
 """
 
 from __future__ import annotations
@@ -116,7 +117,7 @@ def history_rows(hist: dict, columns: set[str] | None, since: datetime) -> list[
                                 r["run_id"]])
     for d in hist["decisions"]:
         if d["at"] >= cutoff and (columns is None or d["column"] in columns):
-            out.append([d["at"], f"Steward decision: {d['action']}", d["column"], "glossary", d["before"],
+            out.append([d["at"], f"Steward decision: {d['action']}", d["column"], d.get("field", "glossary"), d["before"],
                         d["after"] if d["action"] != "confirmed" else "still correct (lineage confirmed)", d["who"],
                         None])
     for s in hist["statuses"]:
@@ -144,6 +145,9 @@ def build(*, rows: list[dict], issues: list[dict], hist: dict, user: str, source
     by_source: dict[str, int] = {}
     for r in rows:
         by_source[r["definition_source"] or "none"] = by_source.get(r["definition_source"] or "none", 0) + 1
+    by_sens: dict[str, int] = {}
+    for r in rows:
+        by_sens[r.get("sensitivity") or "unknown"] = by_sens.get(r.get("sensitivity") or "unknown", 0) + 1
     last = hist["runs"][-1] if hist["runs"] else None
     lines: list[tuple[str, object]] = [
         ("Generated (UTC)", now.replace(tzinfo=None, microsecond=0)),
@@ -164,6 +168,7 @@ def build(*, rows: list[dict], issues: list[dict], hist: dict, user: str, source
         ("  Open issues", len(in_scope)),
         *((f"    status {s}", n) for s, n in sorted(by_status.items())),
         *((f"  Definitions from {s}", n) for s, n in sorted(by_source.items())),
+        *((f"  Personal data: {s}", n) for s, n in sorted(by_sens.items())),
         ("", None),
         ("Recent history", f"last {history_days} days (sheet 'Recent history')"),
         *(("Note", n) for n in hist.get("notes", [])),

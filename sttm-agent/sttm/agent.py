@@ -12,6 +12,7 @@ One run:
   6. write comments/tags back to UC, only where they differ from what is there
   7. save fingerprints + watermark, export the flat sttm_export table + CSV/Markdown
   8. track issues (sttm_meta.issues): which are new, reopened or gone in this run; log the run
+  Sensitivity (personal data) per column is classified at bronze and propagated down the lineage (sensitivity.py).
 """
 
 from __future__ import annotations
@@ -28,13 +29,14 @@ from datetime import datetime, timezone
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
-from . import sqlparse
+from . import sensitivity, sqlparse
 from .config import (CATALOG, DEFAULT_OWNER, GLOSSARY_FILE, HISTORY_RETENTION_DAYS, LANDING_PATH, LAYERS, LLM_ENDPOINT, META, OUTPUT_DIR, PIPELINE_CONF,
                      SCHEMAS, layer_of_schema, load_state, run_sql, sql_str)
 from .sqlparse import FILE_SOURCE, sha
 
 LAYER_SCHEMAS = [SCHEMAS[layer] for layer in LAYERS]
-TAG_KEYS = ("sttm_layer", "sttm_owner", "sttm_definition_source", "sttm_rule_hash", "sttm_comment_hash")
+TAG_KEYS = ("sttm_layer", "sttm_owner", "sttm_definition_source", "sttm_rule_hash", "sttm_comment_hash",
+            "sttm_sensitivity")
 WRITABLE_SOURCES = ("glossary", "llm", "rule", "inherited")      # definitions the agent may write as the column comment
 
 STTM_COLUMNS = {   # name -> SQL type; order = table order
@@ -42,7 +44,8 @@ STTM_COLUMNS = {   # name -> SQL type; order = table order
     "owner": "STRING", "source_columns": "ARRAY<STRING>", "transformation": "STRING", "mapping_kind": "STRING",
     "table_rule": "STRING", "rule_columns": "ARRAY<STRING>", "business_definition": "STRING",
     "definition_source": "STRING",
-    "proposed_definition": "STRING", "lineage_path": "STRING", "bronze_sources": "ARRAY<STRING>",
+    "proposed_definition": "STRING", "sensitivity": "STRING", "sensitivity_source": "STRING",
+    "sensitivity_reason": "STRING", "lineage_path": "STRING", "bronze_sources": "ARRAY<STRING>",
     "lineage_origin": "STRING", "issues": "ARRAY<STRING>", "rule_hash": "STRING", "lineage_hash": "STRING",
     "row_hash": "STRING",
 }
@@ -104,6 +107,13 @@ COMMENT 'Distinct UC lineage edges (column and table level) for the medallion, p
   note STRING, updated_by STRING, updated_at TIMESTAMP)
 COMMENT 'Steward-approved definitions and acknowledgments (written from the STTM viewer app, read by the agent)'
 TBLPROPERTIES (delta.enableChangeDataFeed = true)""")
+    run_sql(w, f"""CREATE TABLE IF NOT EXISTS {META}.sensitivity_overrides (
+  column_key STRING COMMENT '<layer>.<table>.<column>',
+  sensitivity STRING COMMENT 'pii, pii_derived or none; wins over what the agent derives, and columns downstream inherit it',
+  note STRING COMMENT 'Why the steward set it',
+  updated_by STRING, updated_at TIMESTAMP)
+COMMENT 'Steward overrides of the sensitivity (personal data level) of a column (written from the STTM viewer app as the signed-in user, read by the agent)'
+TBLPROPERTIES (delta.enableChangeDataFeed = true)""")
     run_sql(w, f"""CREATE TABLE IF NOT EXISTS {META}.owners (
   owner STRING COMMENT 'Owner team, as named in glossary.toml [owners]',
   members ARRAY<STRING> COMMENT 'Databricks user names (emails) of the people in the team',
@@ -144,7 +154,7 @@ COMMENT 'One row per STTM agent run'""")
     seed_owners(w)
 
 
-HISTORY_TABLES = ("sttm", "glossary", "issue_status", "issues")   # the viewer's History reads their change data feed
+HISTORY_TABLES = ("sttm", "glossary", "issue_status", "issues", "sensitivity_overrides")   # the viewer's History reads their change data feed
 
 
 def keep_history(w: WorkspaceClient) -> None:
@@ -335,6 +345,13 @@ def load_glossary(w: WorkspaceClient) -> tuple[dict, dict, dict]:
             {r["column_key"]: r["acknowledged_lineage_hash"] for r in rows if r["acknowledged_lineage_hash"]})
 
 
+def load_overrides(w: WorkspaceClient) -> dict[str, tuple[str, str | None]]:
+    """Steward sensitivity overrides: <layer>.<table>.<column> -> (level, note)."""
+    return {r["column_key"]: (r["sensitivity"], r["note"]) for r in run_sql(
+        w, f"SELECT column_key, sensitivity, note FROM {META}.sensitivity_overrides WHERE sensitivity IN "
+           "('pii', 'pii_derived', 'none')")}
+
+
 # ---------------------------------------------------------------------------------------------------- LLM
 
 class Drafter:
@@ -397,6 +414,31 @@ class Drafter:
                 time.sleep(1)
         return {}
 
+    def classify(self, tables: list[dict]) -> dict[tuple[str, str], dict]:
+        """Sensitivity of bronze columns whose names the rules can't decide. Metadata only, never data values.
+        Returns {(table, column): {sensitivity, reason}}; empty without an LLM or when the call fails."""
+        if not self.enabled or not tables:
+            return {}
+        payload = json.dumps({"tables": tables}, indent=1)
+        for attempt in range(3):
+            self.calls += 1
+            try:
+                resp = self.w.serving_endpoints.query(
+                    name=self.endpoint, temperature=0.0, max_tokens=2000,
+                    messages=[ChatMessage(role=ChatMessageRole.SYSTEM, content=sensitivity.LLM_SYSTEM),
+                              ChatMessage(role=ChatMessageRole.USER, content=payload)])
+                text = resp.choices[0].message.content
+                if isinstance(text, list):
+                    text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
+                data = json.loads(text[text.index("{"): text.rindex("}") + 1])
+                return {(c["table"], c["column"].lower()): c for c in data["columns"]}
+            except Exception as e:  # noqa: BLE001 - never fail the run on the LLM
+                if attempt == 2:
+                    self.log(f"   ! sensitivity LLM check failed ({e}); undecided names fall back to 'none'")
+                    return {}
+                time.sleep(1)
+        return {}
+
     @staticmethod
     def _rule(item: dict) -> dict:
         """Deterministic fallback: template definition + keyword contradiction check."""
@@ -445,6 +487,7 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
     uc_new, new_wm = pull_uc_lineage(w, log) if not dry_run else (0, None)
     uc_edges, uc_tables = read_uc_edges(w)
     owners, glossary, acks = load_glossary(w)
+    overrides = load_overrides(w)
     prev = {}
     for r in run_sql(w, f"SELECT * FROM {META}.sttm WHERE is_active"):
         for k in ("source_columns", "issues", "bronze_sources", "rule_columns"):
@@ -469,6 +512,7 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
                 "_sql_src": sql_src, "_uc_src": uc_src, "transformation": cm.expression, "mapping_kind": cm.kind,
                 "table_rule": ds.table_rule, "_ctx": ds.context_columns,
                 "rule_hash": sha(f"{cm.expression}|{sorted(sql_src)}|{col['data_type']}|{ds.table_rule}"),
+                "_flows": cm.flows, "_table_comment": table_comments.get(name) or ds.comment,
                 "_uc_comment": col["comment"], "_declared": ds.declared_comments.get(col["column"]),
                 "_tags": tags.get((name, col["column"]), {}),
             }
@@ -514,10 +558,13 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
 
     # which tables need work
     gloss_by_table: dict[str, str] = {}
-    for k, v in sorted(glossary.items()) + sorted((f"ack:{k}", h) for k, h in acks.items()):
-        t = k.removeprefix("ack:").rsplit(".", 1)[0]
+    for k, v in sorted(glossary.items()) + sorted((f"ack:{k}", h) for k, h in acks.items()) \
+            + sorted((f"sens:{k}", f"{lv}|{note}") for k, (lv, note) in overrides.items()):
+        t = k.split(":", 1)[-1].rsplit(".", 1)[0]
         gloss_by_table[t] = gloss_by_table.get(t, "") + f"{k}={v}|"
     new_fp, reasons = {}, {}
+    # rows written by an agent version without sensitivity: process their tables once (backfill), no --full needed
+    backfill = {t for (t, _), p in prev.items() if p.get("sensitivity") is None}
     for name, ds in datasets.items():
         if name not in columns:
             continue
@@ -534,6 +581,8 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
         why = ["full run"] if full else ["new table"] if not old else \
             [k.replace("_hash", "") for k in ("sql_hash", "schema_hash", "glossary_hash", "uc_edges_hash")
              if old.get(k) != fp[k]]
+        if not why and name in backfill:
+            why = ["sensitivity backfill"]
         if why:
             reasons[name] = why
     # downstream of a changed table may change too (lineage path / impact): add them, hashes decide per row
@@ -550,8 +599,9 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
     for n in sorted(changed, key=_layer_order):
         log(f"     {short(n):28} {', '.join(reasons[n])}")
 
-    # 4. definitions + issues for rows of changed tables
+    # 4. definitions + issues for rows of changed tables; sensitivity for every row (downstream needs upstream)
     drafter = Drafter(w, LLM_ENDPOINT, log)
+    sensitivity.assign(rows, prev, overrides, drafter.classify, short, log)
     work = {t: r for t, r in rows.items() if r["target_table"] in changed}
     changed_rules = {t for t, r in rows.items()
                      if (p := prev.get((r["target_table"], r["target_column"]))) and p["rule_hash"] != r["rule_hash"]}
@@ -799,7 +849,7 @@ def write_back(w: WorkspaceClient, work: dict[str, dict], log: Log) -> tuple[int
         col = f"{_ident(t)}.`{c}`"
         desired_tags = {"sttm_layer": r["layer"], "sttm_owner": r["owner"],
                         "sttm_definition_source": r["definition_source"] or "none",
-                        "sttm_rule_hash": r["rule_hash"][:8]}
+                        "sttm_rule_hash": r["rule_hash"][:8], "sttm_sensitivity": r["sensitivity"] or "none"}
         if r["definition_source"] in WRITABLE_SOURCES and r["business_definition"]:
             text = r["business_definition"][:1000]
             desired_tags["sttm_comment_hash"] = sha(text, 8)
@@ -856,6 +906,10 @@ EXPORT_SCHEMA = {   # name -> (SQL type, column comment)
     "business_definition": ("STRING", "Business definition of the column"),
     "definition_source": ("STRING", "glossary (steward-approved), pipeline_sql, uc_comment, inherited, llm or rule"),
     "proposed_definition": ("STRING", "Corrected definition proposed when the current one conflicts with the SQL"),
+    "sensitivity": ("STRING", "Personal data: pii, pii_derived (hashed or masked PII) or none"),
+    "sensitivity_source": ("STRING", ("rule (column name), llm (column name checked by the LLM), inherited (from "
+                                      "the sources, through the lineage) or steward (override)")),
+    "sensitivity_reason": ("STRING", "Why the column has this sensitivity"),
     "lineage_path": ("STRING", "Lineage back to bronze and the landed files: target <- sources <- ..."),
     "bronze_sources": ("STRING", "Bronze columns the target ultimately reads, '; '-separated"),
     "upstream_columns": ("STRING", "Every column this one depends on at any depth, through its sources and its "
@@ -1046,11 +1100,12 @@ def export(w: WorkspaceClient, log: Log) -> None:
         trs = [r for r in rows if r["target_table"] == table]
         md += [f"## `{table}`", "", f"Owner: {trs[0]['owner']}" + (f". Table rule: `{esc(trs[0]['table_rule'])}`"
                                                                    if trs[0]["table_rule"] else ""), "",
-               "| Column | Type | Source | Transformation | Definition (source) | Lineage to bronze |",
-               "|---|---|---|---|---|---|"]
+               "| Column | Type | Source | Transformation | Definition (source) | Personal data | Lineage to bronze |",
+               "|---|---|---|---|---|---|---|"]
         for r in trs:
             md.append(f"| `{r['target_column']}` | {r['data_type']} | {esc(r['source_columns'])} | "
                       f"`{esc(r['transformation'])}` | {esc(r['business_definition'])} ({r['definition_source']}) | "
+                      f"{r['sensitivity'] or ''} ({r['sensitivity_source'] or ''}) | "
                       f"{esc(r['lineage_path'].split(' <- ', 1)[-1] if ' <- ' in r['lineage_path'] else '')} |")
         md.append("")
     (OUTPUT_DIR / "sttm.md").write_text("\n".join(md))
