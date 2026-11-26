@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
-from . import sensitivity, sqlparse
+from . import consumers, sensitivity, sqlparse
 from .config import (CATALOG, DEFAULT_OWNER, GLOSSARY_FILE, HISTORY_RETENTION_DAYS, LANDING_PATH, LAYERS, LLM_ENDPOINT, META, OUTPUT_DIR, PIPELINE_CONF,
                      SCHEMAS, layer_of_schema, load_state, run_sql, sql_str)
 from .sqlparse import FILE_SOURCE, sha
@@ -149,6 +149,7 @@ COMMENT 'STTM agent watermarks'""")
   comments_written INT, tags_written INT, open_issues INT, uc_edges_new BIGINT, lineage_watermark STRING,
   sttm_version BIGINT, details STRING)
 COMMENT 'One row per STTM agent run'""")
+    consumers.ensure_table(w)
     keep_history(w)
     seed_glossary(w)
     seed_owners(w)
@@ -486,6 +487,7 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
         log(f"   ! defined in SQL but not in UC yet (run the pipeline): {', '.join(map(short, missing))}")
     uc_new, new_wm = pull_uc_lineage(w, log) if not dry_run else (0, None)
     uc_edges, uc_tables = read_uc_edges(w)
+    cons = consumers.update(w, log) if not dry_run else {}   # downstream readers; independent of the STTM rows
     owners, glossary, acks = load_glossary(w)
     overrides = load_overrides(w)
     prev = {}
@@ -719,7 +721,7 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
     # 5. MERGE (only for processed tables; rows of other tables are untouched by construction)
     payload = [{k: r.get(k) for k in STTM_COLUMNS} for r in work.values()]
     summary = {"run_id": run_id, "tables_total": len(new_fp), "tables_processed": len(changed),
-               "llm_calls": drafter.calls, "uc_edges_new": uc_new}
+               "llm_calls": drafter.calls, "uc_edges_new": uc_new, **cons}
     plan_changes = [k for k in work if not prev.get(_key(work[k]))
                     or prev[_key(work[k])]["row_hash"] != work[k]["row_hash"]]
     if dry_run:
@@ -775,6 +777,7 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
              "details": json.dumps({"reasons": {short(k): v for k, v in reasons.items()},
                                     "requested_by": os.getenv("STTM_REQUESTED_BY") or None,
                                     "sttm_version_before": v_before,
+                                    "consumer_edges_new": cons.get("consumer_edges_seen"),
                                     "issues_new": summary["issues_new"], "issues_closed": summary["issues_closed"],
                                     "new_issues": summary["new_issue_keys"]})})
     return summary

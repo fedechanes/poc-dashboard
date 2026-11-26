@@ -16,6 +16,7 @@
   --conflict: #b3261e; --conflict-wash: #f6dedb; --review: #8f5d00; --review-wash: #f4e7cc;
   --gap: #6a4b9f; --gap-wash: #e8e1f3; --edge: #b9c3c0; --code-bg: #e7ece9;
   --pii: #8c2a5b; --pii-wash: #f6e0eb;
+  --consumers: #2f5f8a;
   --sans: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
 }
@@ -27,6 +28,7 @@
     --conflict: #ff8f84; --conflict-wash: #3b1f1c; --review: #e8b45a; --review-wash: #3a2d14;
     --gap: #bea4ee; --gap-wash: #2b2340; --edge: #3c4a47; --code-bg: #202a28;
     --pii: #f29ac4; --pii-wash: #3a1d2c;
+    --consumers: #8fb7dd;
   }
 }
 :root[data-theme="dark"] {
@@ -36,6 +38,7 @@
   --conflict: #ff8f84; --conflict-wash: #3b1f1c; --review: #e8b45a; --review-wash: #3a2d14;
   --gap: #bea4ee; --gap-wash: #2b2340; --edge: #3c4a47; --code-bg: #202a28;
   --pii: #f29ac4; --pii-wash: #3a1d2c;
+  --consumers: #8fb7dd;
 }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
@@ -67,10 +70,11 @@ button, input { font: inherit; color: inherit; }
 
 /* ---------- lineage map (the one bold element) ---------- */
 .map-frame { margin: 18px 0 8px; overflow-x: auto; }
-.map { position: relative; min-width: 760px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 64px; padding: 6px 2px 10px; }
+.map { position: relative; min-width: 940px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); column-gap: 56px; padding: 6px 2px 10px; }
 .map svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .map path { fill: none; stroke: var(--edge); stroke-width: 1.5; transition: stroke .25s, stroke-width .25s, opacity .25s; }
 .map path.lit { stroke: var(--verdigris); stroke-width: 2.25; }
+.map path.use { stroke-dasharray: 5 4; }   /* a read by a consumer, not a pipeline hop */
 .map.focused path:not(.lit) { opacity: .35; }
 .lane { display: flex; flex-direction: column; gap: 10px; justify-content: center; position: relative; z-index: 1; }
 .lane h2 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--ink); display: flex; align-items: center; gap: 8px; }
@@ -84,6 +88,17 @@ button, input { font: inherit; color: inherit; }
 .node.on { background: var(--verdigris-wash); border-color: var(--verdigris); border-left-color: var(--metal); }
 .map.focused .node:not(.lit):not(.on) { opacity: .5; }
 .node.landing { border-style: dashed; border-left-style: solid; }
+.node.consumer .ty { display: block; font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); }
+
+/* ---------- consumers ("Used by") ---------- */
+.used { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.used li { border-left: 4px solid var(--consumers); background: var(--surface); border-radius: 3px 6px 6px 3px; padding: 6px 10px; font-size: 14px; }
+.used .ty { font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-2); margin-right: 6px; }
+.used a { color: var(--verdigris); font-weight: 600; }
+.used .via { display: block; color: var(--ink-2); font-size: 13px; }
+.impact { margin: 0 0 14px; padding: 10px 12px; border: 1px solid var(--hair); border-radius: 8px; background: var(--surface); }
+.impact h3 { margin: 0 0 8px; font-size: 14px; }
+.impact .used li { background: var(--paper); }
 
 /* ---------- filter bar ---------- */
 .bar { position: sticky; top: 0; z-index: 5; background: var(--paper); padding: 12px 0 10px; border-bottom: 1px solid var(--hair); }
@@ -318,6 +333,7 @@ ol.ctl .when { color: var(--ink-2); font-size: 12.5px; }
   </div>
 
   <p class="summary" id="summary" aria-live="polite"></p>
+  <section class="impact" id="impact" aria-label="Consumers affected" hidden></section>
   <main id="rows"><div class="state">Reading the mapping…</div></main>
 </div>
 
@@ -328,6 +344,9 @@ const MENUS = [
   ["sensitivity", "Personal data"], ["sensitivity_source", "Personal data from"],
 ];
 const LAYERS = ["landing", "bronze", "silver", "gold"];
+const LANES = [...LAYERS, "consumers"];   // the map's lanes: the medallion, then what reads it ("Used by")
+const CTYPE = { DASHBOARD: "Dashboard", LEGACY_DASHBOARD: "Legacy dashboard", GENIE_SPACE: "Genie space", ALERT: "SQL alert",
+  APP: "App", SQL_QUERY: "SQL query", JOB: "Job", NOTEBOOK: "Notebook", PIPELINE: "Pipeline", TABLE: "Table", ADHOC: "SQL warehouse" };
 const ISSUE = {   // type -> [label, css class, tone variable]
   CONFLICT: ["Conflict", "conflict", "--conflict"], REVIEW: ["Review", "review", "--review"], GAP: ["Gap", "gap", "--gap"],
   "FIX IN PIPELINE SQL": ["Fix in pipeline SQL", "fix", "--conflict"], LINEAGE: ["Lineage mismatch", "lineage", "--review"],
@@ -416,20 +435,58 @@ async function loadMeta(refresh = false) {
 }
 
 /* ---------- lineage map ---------- */
+/* ---------- consumers ("Used by", from system.access.table_lineage via the agent) ---------- */
+const liveConsumers = () => (meta?.consumers || []).filter((c) => c.status !== "deleted");
+const consumerNode = (c) => `consumer:${c.consumer_key}`;
+let allEdges = [];   // pipeline edges between tables + read edges from tables to consumers (map only)
+function affectedTables(dep) {   // a column or a table, and every table downstream of it
+  const out = new Set(), isTable = !!meta.tables.find((t) => t.target_table === dep) || (dep.startsWith("landing/") && !dep.includes("."));
+  if (isTable) {
+    out.add(dep);
+    for (const [c, ts] of Object.entries(meta.downstream || {})) if (c.startsWith(dep + ".")) ts.forEach((t) => out.add(t));
+  } else {
+    out.add(tableOf(dep));
+    (meta.downstream?.[dep] || []).forEach((t) => out.add(t));
+  }
+  return out;
+}
+const consumersOf = (tables) => liveConsumers().filter((c) => c.tables.some((t) => tables.has(t)));
+function usedHtml(list, tables) {
+  return `<ul class="used">${list.map((c) => {
+    const name = c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.name)}</a>` : `<b>${esc(c.name)}</b>`;
+    const reads = c.tables.filter((t) => !tables || tables.has(t));
+    const who = c.consumer_type === "ADHOC" ? "Warehouse queries with no dashboard, job or notebook behind them. Who ran them is not stored."
+      : `Owner: ${c.owner ? esc(c.owner) : "not known"}${c.status === "unknown" ? " (could not look it up)" : ""}.`;
+    return `<li><span class="ty">${esc(CTYPE[c.consumer_type] || c.consumer_type)}</span>${name}
+      <span class="via">Reads ${reads.map((t) => `<code>${esc(t)}</code>`).join(", ")}, last on ${esc(fmtMs(Date.parse(c.last_seen)))}. ${who}</span></li>`;
+  }).join("")}</ul>`;
+}
+function renderImpact() {
+  const box = $("impact");
+  if (!meta || !state.depends_on || state.view !== "ledger") { box.hidden = true; return; }
+  const tables = affectedTables(state.depends_on), list = consumersOf(tables);
+  box.hidden = false;
+  box.innerHTML = list.length
+    ? `<h3>Used by: ${list.length} consumer${list.length > 1 ? "s" : ""} read${list.length > 1 ? "" : "s"} a table that depends on <code>${esc(state.depends_on)}</code></h3>${usedHtml(list, tables)}`
+    : `<h3>Used by: no consumer outside the pipeline reads a table that depends on <code>${esc(state.depends_on)}</code></h3>`;
+}
+
 function mapModel() {
   const nodes = {};
   for (const t of meta.tables) nodes[t.target_table] = { ...t };
   for (const e of meta.edges) for (const n of [e.source, e.target]) if (!nodes[n]) nodes[n] = { target_table: n, layer: layerOf(n), columns: null, open_issues: 0 };
-  const lanes = Object.fromEntries(LAYERS.map((l) => [l, []]));
+  for (const c of liveConsumers()) nodes[consumerNode(c)] = { target_table: consumerNode(c), layer: "consumers", consumer: c };
+  allEdges = [...meta.edges, ...liveConsumers().flatMap((c) => c.tables.filter((t) => nodes[t]).map((t) => ({ source: t, target: consumerNode(c), use: true })))];
+  const lanes = Object.fromEntries(LANES.map((l) => [l, []]));
   for (const n of Object.values(nodes)) if (lanes[n.layer]) lanes[n.layer].push(n.target_table);
   // order each lane by the mean position of its upstream tables, so edges cross as little as possible
   const pos = {};
   lanes.landing.sort().forEach((n, i) => (pos[n] = i));
-  for (const l of LAYERS.slice(1)) {
+  for (const l of LANES.slice(1)) {
     const inLane = new Set(lanes[l]), memo = {};
     const bary = (n, seen = new Set()) => {   // same-lane parents (e.g. customers_cleansed -> customers) sit just above
       if (n in memo) return memo[n];
-      const ups = meta.edges.filter((e) => e.target === n);
+      const ups = allEdges.filter((e) => e.target === n);
       const prior = ups.filter((e) => pos[e.source] != null && !inLane.has(e.source)).map((e) => pos[e.source]);
       const sib = ups.find((e) => inLane.has(e.source) && !seen.has(e.source));
       seen.add(n);
@@ -445,7 +502,7 @@ function reach(start, dir) {
   const out = new Set(), stack = [...start];
   while (stack.length) {
     const n = stack.pop();
-    for (const e of meta.edges) {
+    for (const e of allEdges) {
       const [from, to] = dir === "down" ? [e.source, e.target] : [e.target, e.source];
       if (from === n && !out.has(to)) { out.add(to); stack.push(to); }
     }
@@ -461,11 +518,13 @@ function renderMap() {
   if (sel.size) lit = new Set([...sel, ...reach(sel, "up"), ...reach(sel, "down")]);
   if (dep) lit = new Set([...lit, dep, ...reach([dep], "down")]);
   litNow = lit;
-  const laneName = { landing: "Landed files", bronze: "Bronze", silver: "Silver", gold: "Gold" };
+  const laneName = { landing: "Landed files", bronze: "Bronze", silver: "Silver", gold: "Gold", consumers: "Used by" };
   $("map").className = `map${lit.size ? " focused" : ""}`;
-  $("map").innerHTML = `<svg aria-hidden="true"></svg>` + LAYERS.map((l) => `
+  $("map").innerHTML = `<svg aria-hidden="true"></svg>` + LANES.map((l) => `
     <div class="lane" style="--metal:var(--${l})"><h2>${laneName[l]}</h2>
+      ${l === "consumers" && !lanes[l].length ? `<p class="none" style="margin:0;font-size:13px;color:var(--ink-2)">No dashboard, job or query outside the pipeline has read these tables yet. Unity Catalog records reads 15–20 minutes late.</p>` : ""}
       ${lanes[l].map((n) => {
+        if (l === "consumers") return consumerNodeHtml(nodes[n].consumer, sel, lit);
         const t = nodes[n], name = l === "landing" ? n.slice(8) : n.split(".")[1];
         const issues = +t.open_issues || 0;
         const on = sel.has(n) || dep === n;
@@ -478,6 +537,14 @@ function renderMap() {
     </div>`).join("");
   drawEdges();
 }
+function consumerNodeHtml(c, sel, lit) {
+  const n = consumerNode(c), on = c.tables.every((t) => sel.has(t));
+  const title = `${CTYPE[c.consumer_type] || c.consumer_type} ${c.name}${c.owner ? `, owned by ${c.owner}` : ""}. Reads ${c.tables.join(", ")}. Select to show the columns of those tables.`;
+  return `<button class="node consumer ${on ? "on" : ""} ${lit.has(n) ? "lit" : ""}" data-node="${esc(n)}" data-consumer="${esc(c.consumer_key)}" title="${esc(title)}" aria-pressed="${on}">
+    <span class="ty">${esc(CTYPE[c.consumer_type] || c.consumer_type)}</span><span class="nm">${esc(c.name)}</span>
+    <span class="ct"><span>${c.tables.length} table${c.tables.length > 1 ? "s" : ""}</span>${c.owner ? `<span style="overflow-wrap:anywhere">${esc(c.owner)}</span>` : ""}</span>
+  </button>`;
+}
 function nodeSens(t) {   // tables holding personal data: PII wins over PII-derived
   const p = +t.pii_columns || 0, d = +t.pii_derived_columns || 0;
   if (!p && !d) return "";
@@ -489,7 +556,7 @@ function drawEdges() {
   if (!svg || !meta) return;
   const box = map.getBoundingClientRect();
   const at = (n) => map.querySelector(`[data-node="${cssEsc(n)}"]`)?.getBoundingClientRect();
-  svg.innerHTML = meta.edges.map((e) => {
+  svg.innerHTML = allEdges.map((e) => {
     const a = at(e.source), b = at(e.target);
     if (!a || !b || !a.width) return "";
     const on = litNow.has(e.source) && litNow.has(e.target);
@@ -500,7 +567,7 @@ function drawEdges() {
     }
     const x1 = a.right - box.left, x2 = b.left - box.left;
     const dx = Math.max(24, (x2 - x1) / 2);
-    return `<path class="${on ? "lit" : ""}" d="M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}"/>`;
+    return `<path class="${on ? "lit" : ""} ${e.use ? "use" : ""}" d="M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}"/>`;
   }).join("");
 }
 if (window.ResizeObserver) new ResizeObserver(() => drawEdges()).observe($("map"));
@@ -543,6 +610,7 @@ function renderChips() {
   $("histBtn").setAttribute("aria-pressed", String(state.view === "history"));
   $("piiBtn").setAttribute("aria-pressed", String(piiOnly()));
   for (const id of ["q", "dep", "menus", "chips", "piiBtn"]) $(id).hidden = other;
+  if (other) $("impact").hidden = true;
 }
 
 /* ---------- ledger ---------- */
@@ -564,6 +632,7 @@ function sensBadge(r, withNone = false) {
   return `<span class="sens sens-${v}" title="${esc(SENS[v][1])}${r.sensitivity_reason ? `: ${esc(r.sensitivity_reason)}` : ""}">${SENS[v][0]}</span>`;
 }
 function renderRows() {
+  renderImpact();
   const n = rows.length, tables = new Set(rows.map((r) => r.target_table)).size;
   const open = rows.filter((r) => r.has_open_issue === "true").length;
   const drafts = rows.filter((r) => ["llm", "rule"].includes(r.definition_source)).length;
@@ -653,6 +722,7 @@ function detailHtml(r, key) {
       <h4>Personal data</h4>${sensHtml(r, key)}
       <h4>Where it comes from</h4>
       ${ladderHtml(r.lineage_path)}
+      ${usedByHtml(key)}
       <h4>Details</h4>
       <dl class="meta">
         <dt>Lineage origin</dt><dd>${esc(r.lineage_origin)}</dd>
@@ -666,6 +736,13 @@ function detailHtml(r, key) {
       </div>
     </div>
   </div>`;
+}
+
+function usedByHtml(key) {   // consumers of this column's table and of every table downstream of the column
+  if (!meta) return "";
+  const tables = affectedTables(key), list = consumersOf(tables);
+  return `<h4>Used by</h4>${list.length ? `${usedHtml(list, tables)}<p class="note" style="font-size:13px;color:var(--ink-2);margin:6px 0 0">From table-level lineage: a consumer that reads a table may not use this column.</p>`
+    : `<p style="margin:0;font-size:14px;color:var(--ink-2)">No dashboard, job or query outside the pipeline reads <code>${esc(tableOf(key))}</code>${tables.size > 1 ? " or the tables built from this column" : ""}.</p>`}`;
 }
 
 /* ---------- steward decisions ---------- */
@@ -1133,6 +1210,11 @@ document.addEventListener("click", (e) => {
   if (t.dataset.node) {
     const n = t.dataset.node;
     if (t.dataset.landing) { state.depends_on = state.depends_on === n ? "" : n; $("dep").value = state.depends_on; }
+    else if (t.dataset.consumer) {
+      const c = liveConsumers().find((x) => x.consumer_key === t.dataset.consumer), sel = state.filters.table || new Set();
+      const on = c.tables.every((x) => sel.has(x));
+      for (const x of c.tables) { toggle("table", x, !on); delete fold[x]; }
+    }
     else { toggle("table", n, !(state.filters.table || new Set()).has(n)); delete fold[n]; }
     state.open = null; update();
   } else if (t.dataset.chip) {

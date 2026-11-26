@@ -100,6 +100,7 @@ OWNERS_TABLE = TABLE.rsplit(".", 1)[0] + ".`owners`"
 ISSUES_TABLE = TABLE.rsplit(".", 1)[0] + ".`issues`"
 STATUS_TABLE = TABLE.rsplit(".", 1)[0] + ".`issue_status`"
 OVERRIDES_TABLE = TABLE.rsplit(".", 1)[0] + ".`sensitivity_overrides`"
+CONSUMERS_TABLE = TABLE.rsplit(".", 1)[0] + ".`consumers`"
 SENSITIVITY = ("pii", "pii_derived", "none")
 STATUSES = ("open", "in_progress", "accepted", "wont_fix")
 STEWARDS = os.getenv("STTM_STEWARDS_GROUP", "sttm-stewards")
@@ -182,9 +183,14 @@ def facets(refresh: bool = False) -> dict:
                                     count_if(sensitivity = 'pii') AS pii_columns,
                                     count_if(sensitivity = 'pii_derived') AS pii_derived_columns
                              FROM {TABLE} GROUP BY ALL""")
-        upstream = run_sql(f"""SELECT DISTINCT c FROM {TABLE}
-                               LATERAL VIEW explode(split(upstream_columns, '; ')) AS c WHERE c <> ''
-                               UNION SELECT concat(target_table, '.', target_column) FROM {TABLE}""")
+        lineage = run_sql(f"SELECT target_table, target_column, upstream_columns FROM {TABLE}")
+        columns, downstream = set(), {}   # column -> tables that read it at any depth (for "Used by")
+        for r in lineage:
+            columns.add(f"{r['target_table']}.{r['target_column']}")
+            for c in (r["upstream_columns"] or "").split("; "):
+                if c.strip():
+                    columns.add(c.strip())
+                    downstream.setdefault(c.strip(), set()).add(r["target_table"])
         stats = run_sql(f"""SELECT count(*) AS columns, count(DISTINCT target_table) AS tables,
                                    count_if(has_open_issue) AS open_issues, max(updated_at) AS updated_at,
                                    count_if(sensitivity IN ('pii', 'pii_derived')) AS personal_columns,
@@ -195,9 +201,28 @@ def facets(refresh: bool = False) -> dict:
             for c in f"{r['source_columns'] or ''}; {r['rule_columns'] or ''}".split("; "):
                 if c.strip():
                     edges.add((c.strip().rsplit(".", 1)[0], r["target_table"]))
-        return {"facets": out, "tables": tables, "columns": sorted(r["c"] for r in upstream), "stats": stats,
-                "edges": [{"source": s, "target": t} for s, t in sorted(edges)], "table_name": TABLE.replace("`", "")}
+        return {"facets": out, "tables": tables, "columns": sorted(columns), "stats": stats,
+                "edges": [{"source": s, "target": t} for s, t in sorted(edges)], "table_name": TABLE.replace("`", ""),
+                "consumers": load_consumers(), "downstream": {c: sorted(t) for c, t in downstream.items()}}
     return cached("facets", load, refresh)
+
+
+def load_consumers() -> list[dict]:
+    """Downstream consumers (dashboards, jobs, ad hoc queries...) with the medallion tables each one reads, from the
+    agent's consumers table (system.access.table_lineage). Empty if the agent has not created the table yet."""
+    try:
+        rows = run_sql(f"""SELECT consumer_key, consumer_type, consumer_id, name, owner, url, status,
+                                  collect_set(source_table) AS tables, max(last_seen) AS last_seen,
+                                  min(first_seen) AS first_seen
+                           FROM {CONSUMERS_TABLE} GROUP BY ALL
+                           ORDER BY consumer_type = 'ADHOC', consumer_type, name""")
+    except HTTPException as e:
+        if "TABLE_OR_VIEW_NOT_FOUND" in str(e.detail):
+            return []
+        raise
+    for r in rows:
+        r["tables"] = sorted(json.loads(r["tables"] or "[]"))
+    return rows
 
 
 def filters_of(request: Request) -> dict:
@@ -463,7 +488,8 @@ def export_xlsx(request: Request, refresh: bool = False) -> Response:
     f = filters_of(request)
     data = audit.build(rows=filtered_rows(f, refresh), issues=load_issues(refresh), hist=get_history(refresh),
                        user=whoami(request)["user"], source_table=TABLE.replace("`", ""), filters=f,
-                       history_days=AUDIT_HISTORY_DAYS)
+                       history_days=AUDIT_HISTORY_DAYS, consumers=(m := facets(refresh))["consumers"],
+                       downstream=m["downstream"])
     name = f"sttm_audit_{time.strftime('%Y%m%d_%H%M', time.gmtime())}.xlsx"
     return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     headers={"content-disposition": f'attachment; filename="{name}"', "cache-control": "no-store"})

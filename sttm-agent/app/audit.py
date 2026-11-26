@@ -1,8 +1,9 @@
 """'Download for audit': the STTM as an Excel workbook (openpyxl), built in the app.
 
 Sheets: Cover (when, who, table versions, counts incl. personal data levels, filters), one sheet per table with the
-export's columns (sensitivity included), Open issues with the owners' statuses, and Recent history (agent-run changes,
-steward decisions and sensitivity overrides, status changes).
+export's columns (sensitivity included), Open issues with the owners' statuses, Used by (the dashboards, jobs and queries
+that read those tables or tables built from them), and Recent history (agent-run changes, steward decisions and
+sensitivity overrides, status changes).
 """
 
 from __future__ import annotations
@@ -131,7 +132,8 @@ def history_rows(hist: dict, columns: set[str] | None, since: datetime) -> list[
 
 
 def build(*, rows: list[dict], issues: list[dict], hist: dict, user: str, source_table: str, filters: dict,
-          history_days: int) -> bytes:
+          history_days: int, consumers: list[dict] | None = None,
+          downstream: dict[str, list[str]] | None = None) -> bytes:
     now = datetime.now(UTC)
     wb = Workbook()
     cover = wb.active
@@ -148,6 +150,9 @@ def build(*, rows: list[dict], issues: list[dict], hist: dict, user: str, source
     by_sens: dict[str, int] = {}
     for r in rows:
         by_sens[r.get("sensitivity") or "unknown"] = by_sens.get(r.get("sensitivity") or "unknown", 0) + 1
+    # consumers of these tables, or of tables built from these columns (table-level lineage)
+    reach = set(tables) | {t for k in keys for t in (downstream or {}).get(k, [])}
+    used_by = [c for c in consumers or [] if set(c["tables"]) & reach]
     last = hist["runs"][-1] if hist["runs"] else None
     lines: list[tuple[str, object]] = [
         ("Generated (UTC)", now.replace(tzinfo=None, microsecond=0)),
@@ -169,6 +174,7 @@ def build(*, rows: list[dict], issues: list[dict], hist: dict, user: str, source
         *((f"    status {s}", n) for s, n in sorted(by_status.items())),
         *((f"  Definitions from {s}", n) for s, n in sorted(by_source.items())),
         *((f"  Personal data: {s}", n) for s, n in sorted(by_sens.items())),
+        ("  Downstream consumers", f"{sum(c['status'] != 'deleted' for c in used_by)} (sheet 'Used by')"),
         ("", None),
         ("Recent history", f"last {history_days} days (sheet 'Recent history')"),
         *(("Note", n) for n in hist.get("notes", [])),
@@ -182,7 +188,7 @@ def build(*, rows: list[dict], issues: list[dict], hist: dict, user: str, source
     cover.column_dimensions["A"].width = 34
     cover.column_dimensions["B"].width = 90
 
-    used = {"cover", "open issues", "recent history"}
+    used = {"cover", "open issues", "used by", "recent history"}
     header = list(rows[0].keys()) if rows else []
     for t in tables:
         ws = wb.create_sheet(_sheet_name(t, used))
@@ -194,6 +200,11 @@ def build(*, rows: list[dict], issues: list[dict], hist: dict, user: str, source
            [[i["column_key"], i["target_table"], i["owner"], i["issue_type"], i["issue_text"], i["status"],
              i["assignee"], i["comment"], i["updated_by"], i["updated_at"], i["opened_run"], i["opened_at"]]
             for i in in_scope])
+
+    ws = wb.create_sheet("Used by")
+    _table(ws, ["Type", "Name", "Owner", "Status", "Reads (in scope)", "Reads (all)", "First read", "Last read", "Link"],
+           [[c["consumer_type"], c["name"], c["owner"], c["status"], sorted(set(c["tables"]) & reach), c["tables"],
+             c["first_seen"], c["last_seen"], c["url"]] for c in used_by])
 
     ws = wb.create_sheet("Recent history")
     _table(ws, ["When (UTC)", "What", "Column", "Field", "Before", "After", "Who", "Agent run"],

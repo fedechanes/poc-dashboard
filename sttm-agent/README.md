@@ -7,6 +7,7 @@ A small, reproducible proof of concept. It covers these things:
 - **Agent.** It reads the deployed pipeline SQL plus Unity Catalog (UC) metadata and lineage. It drafts missing definitions with a Foundation Model API LLM and writes them back as **column comments and tags**. It also flags gaps and conflicts.
 - **Personal data.** Every column is classified `pii`, `pii_derived` or `none`: by name at bronze (rules, then the LLM for undecided names; no data values are read), then down the lineage, with steward overrides. The level goes to the STTM and to a `sttm_sensitivity` column tag ([personal data](#personal-data-sensitivity)).
 - **Incremental updates.** Both the data and the metadata are refreshed incrementally. The [answer](#incremental-updates-the-answer) comes with evidence from a demo run.
+- **Impact beyond gold.** The agent also reads who uses the medallion outside the pipeline (dashboards, jobs, notebooks, Genie spaces, ad hoc queries) from the lineage system tables. The app shows them in a *Used by* lane and in every impact analysis ([downstream consumers](#downstream-consumers-impact-beyond-gold)).
 - **Viewer app.** A small web app over `sttm_export` with filters and impact analysis. Stewards approve definitions in it, and owners work through the issues on their tables, with an email from a SQL alert when an agent run finds new ones. A History tab shows who changed what and when, and **Download for audit** saves it all as an Excel workbook. It runs locally or as a Databricks App ([viewer app](#viewer-app)).
 
 It lives next to the dashboard-embedding POC in this repo but shares nothing with it except `pyproject.toml`. It has its own folder, its own schemas (`<catalog>.sttm_*`) and its own pipeline.
@@ -23,7 +24,8 @@ uv run python sttm-agent/run.py demo              # incremental demo (see below)
 uv run python sttm-agent/run.py agent             # incremental agent run; --full to reprocess, --dry-run to preview
 uv run python sttm-agent/app/app.py               # viewer app on http://localhost:8001
 uv run python sttm-agent/run.py app-deploy        # the same app as a Databricks App
-uv run python sttm-agent/run.py destroy           # delete the pipeline and drop the sttm_* schemas
+uv run python sttm-agent/run.py demo-dashboard    # the "STTM demo - Sales" dashboard: a consumer of gold
+uv run python sttm-agent/run.py destroy           # delete the app, job, demo dashboard and pipeline; drop the sttm_* schemas
 ```
 
 Every command is safe to re-run.
@@ -50,7 +52,9 @@ sttm_silver   customers_cleansed   streaming table: casts, renames, initcap/lowe
 sttm_gold     customer_360         MV: customers LEFT JOIN per-customer order aggregates
               daily_sales          MV: orders ⋈ products ⋈ customers, filtered, grouped by day/category/country
 sttm_meta     sttm, sttm_export, table_fingerprints, uc_lineage, agent_state, agent_runs, pipeline_event_log,
-              glossary, sensitivity_overrides, owners, issues, issue_status
+              glossary, sensitivity_overrides, owners, issues, issue_status, consumers
+        ▼
+Used by       dashboards, jobs, notebooks, Genie spaces, ad hoc queries... that read the medallion (from system.access)
 ```
 
 | Path | Role |
@@ -62,6 +66,8 @@ sttm_meta     sttm, sttm_export, table_fingerprints, uc_lineage, agent_state, ag
 | [`sttm/sqlparse.py`](sttm/sqlparse.py) | Lakeflow SQL → per-column expression and sources (sqlglot), plus table rules (joins, filters, dedup, grain, AUTO CDC). |
 | [`sttm/agent.py`](sttm/agent.py) | The agent: change detection, definitions, checks, MERGE, write-back, export. |
 | [`sttm/sensitivity.py`](sttm/sensitivity.py) | Personal data: name rules, the LLM check for undecided names, propagation down the lineage, steward overrides. |
+| [`sttm/consumers.py`](sttm/consumers.py) | Downstream consumers: incremental pull from `system.access.table_lineage`, names, owners and links from the workspace APIs. |
+| [`sttm/demo_dashboard.py`](sttm/demo_dashboard.py) | The "STTM demo - Sales" AI/BI dashboard over gold, created, published and refreshed by `run.py demo-dashboard`. |
 | [`run.py`](run.py) | The CLI above, including the demo. |
 | [`app/`](app) | The viewer app: FastAPI ([`app.py`](app/app.py)) and one static page ([`static/index.html`](app/static/index.html)), plus [`app.yaml`](app/app.yaml) for Databricks Apps. [`history.py`](app/history.py) reads the audit history from change data feed; [`audit.py`](app/audit.py) builds the Excel workbook. |
 
@@ -190,6 +196,7 @@ SELECT * FROM <cat>.information_schema.column_tags WHERE schema_name LIKE 'sttm_
 |---|---|
 | **Which tables to look at** | `sttm_meta.table_fingerprints` keeps one row per target table: hash of its normalised SQL statement (`sql_hash`), hash of its UC columns, types, comments and tags (`schema_hash`), hash of its glossary entries, and hash of its UC lineage edges. A table is processed only if one of these changed. Its downstream tables are processed too, because their lineage may have changed; hashes then decide per row. |
 | **UC lineage** | Pulled incrementally from `system.access.column_lineage` and `table_lineage` with a watermark on `event_time`. Events can land late, so each pull re-reads a 2-hour overlap; the `MERGE` into `sttm_meta.uc_lineage` is idempotent. |
+| **Consumers** | Read events of the medallion tables, pulled from `table_lineage` the same way (own watermark, 2-hour overlap). Only edges that are new or seen later are merged, and names are rewritten only when they changed, so a run with nothing new writes nothing to `sttm_meta.consumers`. They do not touch the STTM rows. See [downstream consumers](#downstream-consumers-impact-beyond-gold). |
 | **Which rows changed** | `rule_hash` covers the column's own expression, sources, type and table rule. `lineage_hash` covers `rule_hash` plus the `lineage_hash` of every upstream column, including filter, join and dedup columns. `row_hash` covers everything that is exported. |
 | **STTM table** | `MERGE … WHEN MATCHED AND t.row_hash <> s.row_hash THEN UPDATE … WHEN NOT MATCHED THEN INSERT … WHEN NOT MATCHED BY SOURCE (in processed tables) THEN is_active = false`. Change data feed records exactly the touched rows, so downstream consumers can read `table_changes()`. |
 | **LLM** | Called only for new columns, or columns whose `lineage_hash` changed. A curated definition gets a check, not a redraft, when it or anything upstream changed. Pass-through columns inherit the upstream definition without a call. |
@@ -253,9 +260,9 @@ The run log is also in `sttm_meta.agent_runs`: one row per run, with counts, the
 
 | Filter | What it is for |
 |---|---|
-| **Table** (the nodes of the lineage map at the top) | The asked-for `table_name` filter. The map shows landed files → bronze → silver → gold, with table-level edges from the STTM. Selecting a table highlights everything upstream and downstream of it. Selecting a landed source shows every column fed by those files. |
+| **Table** (the nodes of the lineage map at the top) | The asked-for `table_name` filter. The map shows landed files → bronze → silver → gold → *Used by*, with table-level edges from the STTM and dashed read edges to the consumers. Selecting a table highlights everything upstream and downstream of it, consumers included. Selecting a landed source shows every column fed by those files. Selecting a consumer selects the tables it reads. |
 | **Needs review** / **Issue type** | The review worklist: every column with an open issue, or one type (`CONFLICT`, `REVIEW`, `GAP`, `FIX IN PIPELINE SQL`, `LINEAGE`, `INFO`). |
-| **Depends on** | Impact analysis: everything downstream of a column or a table, through sources and table rules. For example, `silver.orders.is_cancelled` returns 12 gold columns, because `daily_sales` filters on it. |
+| **Depends on** | Impact analysis: everything downstream of a column or a table, through sources and table rules. For example, `silver.orders.is_cancelled` returns 12 gold columns, because `daily_sales` filters on it. A *Used by* box above the results lists the consumers that read any of those tables, with owner and link. |
 | **Definition source** | `glossary`, `pipeline_sql`, `uc_comment`, `inherited`, `llm`, `rule`. `llm` shows what nobody has curated yet. |
 | **Contains personal data** (button) / **Personal data** / **Personal data from** | Columns that are `pii` or `pii_derived` (the count is on the button), one level, or how the level was decided (`rule`, `llm`, `inherited`, `steward`). |
 | **Layer**, **Owner** | Who has to review what. |
@@ -273,6 +280,7 @@ Clicking a row shows:
 - **Personal data**: the level, how it was decided and why. Stewards can **Override** it, with an optional note, or **Remove override**. An override shows as **Pending** until the next agent run applies it, and the masthead counts it with the other pending decisions;
 - the transformation and table rule, with SQL highlighting, and the columns the rule reads;
 - the lineage path, one rung per hop back to the landed files;
+- **Used by**: the consumers that read this column's table or any table built from this column, with type, owner, link and last read;
 - the issues, and the suggested definition with a copy button;
 - the run history.
 
@@ -300,11 +308,11 @@ The command:
    - the agent job (`agent-job`, *Can manage run*).
 
    [`app.yaml`](app/app.yaml) passes them to the app as `DATABRICKS_WAREHOUSE_ID` and `STTM_JOB_ID`.
-3. Grants the app's service principal read access to eight tables only: `USE CATALOG` on the catalog, `USE SCHEMA` on `sttm_meta`, and `SELECT` on `sttm_export`, `sttm` (for the History tab, see [history](#history-and-download-for-audit)), `agent_runs`, `glossary`, `sensitivity_overrides`, `owners`, `issues` and `issue_status`. It grants the stewards group (`STTM_STEWARDS_GROUP`, default `sttm-stewards`) `SELECT` and `MODIFY` on `glossary`, `sensitivity_overrides` and `issue_status`, grants every member of an owner team `SELECT` and `MODIFY` on `issue_status`, and turns on user authorization for the app with the `sql` scope.
+3. Grants the app's service principal read access to nine tables only: `USE CATALOG` on the catalog, `USE SCHEMA` on `sttm_meta`, and `SELECT` on `sttm_export`, `sttm` (for the History tab, see [history](#history-and-download-for-audit)), `agent_runs`, `glossary`, `sensitivity_overrides`, `owners`, `issues`, `issue_status` and `consumers`. It grants the stewards group (`STTM_STEWARDS_GROUP`, default `sttm-stewards`) `SELECT` and `MODIFY` on `glossary`, `sensitivity_overrides` and `issue_status`, grants every member of an owner team `SELECT` and `MODIFY` on `issue_status`, and turns on user authorization for the app with the `sql` scope.
 4. Creates or updates one SQL alert per owner team in `/Workspace/Users/<you>/sttm-agent/alerts`, and adds one alert task per team to the agent job (see [notifications](#owners-worklist-and-notifications)).
 5. Uploads `app/` to `/Workspace/Users/<you>/sttm-agent/app` and deploys it. It prints the app URL. Viewers sign in with their Databricks account and need *Can use* on the app.
 
-If the app was stopped, the command starts it again. `run.py destroy` deletes the app and the job and moves the alerts to the trash. Re-run `app-deploy` after editing `glossary.toml` or the agent code: the job runs the uploaded copy.
+If the app was stopped, the command starts it again. `run.py destroy` deletes the app and the job and moves the alerts and the demo dashboard to the trash. Re-run `app-deploy` after editing `glossary.toml` or the agent code: the job runs the uploaded copy.
 
 **Run agent button.** It starts the agent job; only one run at a time.
 - While it runs, the page shows its progress. When it finishes, the page reloads the mapping and says what changed, from `agent_runs`, with a link to the run.
@@ -415,6 +423,7 @@ Everything is read from [change data feed](https://docs.databricks.com/aws/en/de
 | Cover | When (UTC), who generated it (the signed-in user), the source table, the filters, the current Delta version of `sttm`, `sttm_export`, `glossary`, `sensitivity_overrides`, `issue_status` and `issues`, the latest agent run and the `sttm` version it wrote, and counts: columns, tables, columns to review, open issues by status, definitions by source, columns by personal data level. |
 | One per table | The rows of that table, with the same columns as `sttm_export` / the CSV, including `sensitivity`, `sensitivity_source` and `sensitivity_reason`. With **Contains personal data** on, the workbook is an inventory of the personal data columns. |
 | Open issues | Open issues on those columns, with status, assignee, comment, who set it and when. |
+| Used by | The consumers that read those tables or tables built from those columns: type, name, owner, status, the tables it reads (in scope and all), first and last read, link. The cover counts them. |
 | Recent history | The last `STTM_AUDIT_HISTORY_DAYS` (default 30) days, one line per changed field: agent runs, column changes, issues opened and closed, steward decisions and statuses. With filters, only lines for the filtered columns (runs are always listed). |
 
 Text that starts with `=`, `+`, `-` or `@` is stored as text, never as a formula.
@@ -430,11 +439,68 @@ Limits:
 - A `full` agent run rewrites every row; History shows those rows as "only the lineage fingerprint changed" when nothing visible changed.
 - Who *started* a run is recorded only for runs started from the app (`requested_by`). Runs from the command line show "not recorded".
 
+## Downstream consumers (impact beyond gold)
+
+The STTM says how each column is built. Phase E adds **who uses it after gold**: the dashboards, jobs, notebooks, Genie spaces, apps and ad hoc queries that read the medallion tables. A change upstream, for example to `silver.orders.is_cancelled`, now names the dashboards it reaches and who owns them.
+
+**Where it comes from.** Unity Catalog records every read it can attribute in [`system.access.table_lineage`](https://docs.databricks.com/aws/en/admin/system-tables/lineage). A read has a source table and no target ("Read-only: the source type is not null, but target type is null"). Each agent run, before it builds the STTM, pulls the new read events of the bronze, silver and gold tables (`sttm/consumers.py`):
+
+| Step | What it does |
+|---|---|
+| Window | `event_time > watermark − 2 hours` (watermark `consumers_watermark` in `agent_state`), and only this workspace's events (`workspace_id`). The lineage tables cover every workspace attached to the metastore ("Lineage is aggregated across all workspaces attached to a Unity Catalog metastore", [data lineage](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-lineage)); a dashboard in another workspace could not be looked up from here. |
+| Who read it | From `entity_metadata` first, because Genie spaces, apps and alerts arrive with a NULL `entity_type` and only an id there: `dashboard_id` → Dashboard, `legacy_dashboard_id`, `genie_space_id`, `alert_id`, `app_id`, `sql_query_id`, `job_info.job_id` (a notebook run by a job counts as the job), `notebook_id`, `dlt_pipeline_info`. Then `entity_type` / `entity_id` (`DASHBOARD_V3`, `DBSQL_DASHBOARD`, `DBSQL_QUERY`, `JOB`, `NOTEBOOK`, `PIPELINE`). |
+| Left out | Hops inside the medallion (target in a medallion schema; those are in `uc_lineage`) and every pipeline that writes the medallion in the same window: the producer's refreshes also show up as reads of gold. |
+| Tables built from ours | A target outside the medallion (a CTAS or `INSERT … SELECT` from gold into another schema) becomes a **Table** consumer, owner from the Tables API. |
+| Ad hoc queries | Events with no entity at all: "no Databricks entity was involved in the event", for example JDBC, the SQL editor or the SDK. |
+| Names, owners, links | Looked up through the workspace APIs on every run for the known consumers: Lakeview (dashboard name, owner = the user with a direct *Can manage*, since dashboards have no *Is owner*), Jobs, Pipelines, Genie, Queries, Alerts v2, Apps and Tables. A consumer the API no longer finds keeps its last name with status `deleted`, and the app hides it. |
+
+**Ad hoc queries: grouped, not left out.** All reads without an entity become one node per table, *Ad hoc queries* under *SQL warehouse*. They are a real dependency: someone queries `silver.customers` directly, and a change there affects them, so leaving them out would understate the impact. But they have no name, owner or link to show, so one node per table is enough. Who ran them (`created_by`) is **not stored**: the table says that a table is read ad hoc and when, not by whom.
+
+**`sttm_meta.consumers`**, one row per table and consumer:
+
+| Column | Content |
+|---|---|
+| `source_table` | `<layer>.<table>` that is read |
+| `consumer_key`, `consumer_type`, `consumer_id` | `DASHBOARD:<id>`, `JOB:<id>`, `TABLE:<full name>`, … or `ADHOC` |
+| `name`, `owner`, `url`, `status` | From the APIs; `status` is `active`, `deleted` or `unknown` (no access or no API) |
+| `first_seen`, `last_seen` | First and latest read event |
+| `resolved_at` | When a lookup last changed the name, owner, link or status |
+
+The app's service principal gets `SELECT` on it (`app-deploy`), like the other tables it reads. The STTM rows and `sttm_export` are unchanged: consumers hang off tables, and the app joins them to columns.
+
+**In the app.**
+- **Map:** a fifth lane, *Used by*, with dashed edges from each table to the consumers that read it. Selecting a table or a column lights the consumers downstream of it; selecting a consumer selects the tables it reads.
+- **What depends on…:** a *Used by* box above the results lists every consumer that reads the column's table or any table built from it, with type, link, owner and last read.
+- **Column detail:** the same list for that column.
+- **Download for audit:** a *Used by* sheet, and the count on the cover.
+
+The app knows which tables are built from a column from `sttm_export.upstream_columns` (through sources and table rules), so the list follows the same impact rules as the rest of the app. The lineage is **table-level**: a dashboard that reads `gold.daily_sales` is listed for every column of it, even one it does not show. The column detail says so.
+
+**Demo consumer.** `run.py demo-dashboard` creates the AI/BI dashboard **STTM demo - Sales** (`STTM_DEMO_DASHBOARD_NAME`) in `/Workspace/Users/<you>/sttm-agent/dashboards`:
+- three counters and two charts over `gold.daily_sales` and `gold.customer_360`, with bare table names and the catalog and gold schema passed as dataset defaults, so it follows `STTM_CATALOG` and `STTM_PREFIX`;
+- created once, then updated in place by the id in `sttm_state.json` (or found by name in that folder), and published with embedded credentials;
+- then refreshed once by a one-time job run with a [dashboard task](https://docs.databricks.com/aws/en/jobs/tasks/dashboard) ("refresh results on a published Databricks dashboard") (`runs submit`, no job is kept), so its queries run and Unity Catalog records the reads without anyone opening it in a browser.
+
+`run.py destroy` moves it to the trash.
+
+Measured in this workspace (26 November 2026):
+1. `run.py demo-dashboard` created and published the dashboard, and the refresh run succeeded. A re-run updated it in place (same id) and refreshed it again.
+2. The refresh's reads were recorded as `entity_type = DASHBOARD_V3` with the dashboard id, on both gold tables. `entity_metadata` also carried the `job_info` of the one-time run, so the order above matters: the dashboard wins over the job. Warehouse reads of gold without any entity a minute earlier (the dataset checks while the dashboard was created, or test queries: lineage cannot tell them apart) became *Ad hoc queries*.
+3. The next agent run (56 s, nothing else to do) merged 4 new edges and made 2 lookups. The pass after it read the same events again in the overlap and wrote nothing. The agent job (103 s, `requested_by=phase-e-test`) ran the same pass with nothing new.
+4. Locally and in the deployed app (jsdom against both): the *Used by* lane shows **Dashboard: STTM demo - Sales** and *Ad hoc queries*, with 7 dashed read edges. **What depends on `silver.orders.is_cancelled`** lists the dashboard with its owner and link, and lights it on the map. The column detail of `gold.daily_sales.revenue_eur` lists it. The filtered workbook has the *Used by* sheet with 2 consumers.
+
+Limits:
+- **Lag.** The docs give no latency for the lineage system tables. Measured here: the dashboard's reads at 18:25:43 UTC appeared between 18:42 and 18:45, about **17–20 minutes**. Earlier that day the whole table was briefly more than an hour behind (newest event 76 minutes old), so allow for more. Until then a new consumer is missing, and the run after the lag picks it up.
+- **Only what Unity Catalog captures.** "Both lineage tables represent a subset of all read/write events, as it is not always possible to capture lineage" ([lineage system tables](https://docs.databricks.com/aws/en/admin/system-tables/lineage)). Reads from outside Databricks that do not go through a warehouse, and tools that copy data out first, are not seen.
+- **Retention.** The lineage system tables keep 395 days. `sttm_meta.consumers` keeps what it has seen, so an old consumer stays listed with its last read date.
+- **Notebooks have no name lookup by id.** They are shown as *Notebook &lt;id&gt;* with a link; the owner is the user with a direct *Can manage*, if any.
+- **A consumer of a consumer** (a dashboard over a table built from gold) is not followed: only direct readers of the medallion are listed.
+
 ## Feasibility on Free Edition (checked against the workspace)
 
 | Capability | Result in this workspace | Docs |
 |---|---|---|
-| UC lineage system tables | `system.access.table_lineage` and `column_lineage` exist and are populated. **Table-level** lineage for every pipeline hop appears about **15–20 min** after the update. **Column-level** events for this pipeline arrive **without source columns** (65/65 rows with a NULL source). A trivial probe pipeline (`SELECT id, name FROM STREAM t`) and a warehouse CTAS did get column edges. So the SQL parser is the primary column-lineage source, and UC lineage confirms it at table level (`lineage_origin = "sql, uc table-confirmed"`) and is merged per column when present. | [Data lineage](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-lineage), [Lineage system tables](https://docs.databricks.com/aws/en/admin/system-tables/lineage) |
+| UC lineage system tables | `system.access.table_lineage` and `column_lineage` exist and are populated. Reads are recorded too: pipeline refreshes (`PIPELINE`), AI/BI dashboards (`DASHBOARD_V3`), Genie spaces and apps (NULL `entity_type`, id in `entity_metadata`), and plain warehouse queries (no entity); see [downstream consumers](#downstream-consumers-impact-beyond-gold). **Table-level** lineage for every pipeline hop appears about **15–20 min** after the update. **Column-level** events for this pipeline arrive **without source columns** (65/65 rows with a NULL source). A trivial probe pipeline (`SELECT id, name FROM STREAM t`) and a warehouse CTAS did get column edges. So the SQL parser is the primary column-lineage source, and UC lineage confirms it at table level (`lineage_origin = "sql, uc table-confirmed"`) and is merged per column when present. | [Data lineage](https://docs.databricks.com/aws/en/data-governance/unity-catalog/data-lineage), [Lineage system tables](https://docs.databricks.com/aws/en/admin/system-tables/lineage) |
 | Lakeflow Declarative Pipelines | Serverless pipelines work: streaming tables, materialized views, AUTO CDC, expectations, multi-schema publishing. Limit: one active pipeline per type. | [Free Edition limitations](https://docs.databricks.com/aws/en/getting-started/free-edition-limitations), [AUTO CDC](https://docs.databricks.com/aws/en/ldp/cdc), [Incremental refresh](https://docs.databricks.com/aws/en/optimizations/incremental-refresh), [read_files](https://docs.databricks.com/aws/en/sql/language-manual/functions/read_files) |
 | Jobs / SQL warehouse | Jobs work (5 concurrent tasks max). One 2X-Small serverless SQL warehouse. | [Free Edition limitations](https://docs.databricks.com/aws/en/getting-started/free-edition-limitations) |
 | LLM | Foundation Model API pay-per-token endpoints are ready: Llama 3.3 70B, Llama 4 Maverick, GPT-OSS 20B/120B, Qwen3-Next 80B, Qwen 3.5 122B, Gemma 3. `ai_query()` works from the warehouse. The agent calls the endpoint through the SDK. Qwen3-Next 80B judged conflicts correctly and consistently at about 2 s per call. Llama 3.3 70B and Llama 4 Maverick flip-flopped on the same check. Fallback without an LLM: `STTM_LLM_ENDPOINT=none` (rule-based templates and keyword checks). | [ai_query](https://docs.databricks.com/aws/en/sql/language-manual/functions/ai_query), [Supported models](https://docs.databricks.com/aws/en/machine-learning/foundation-model-apis/supported-models) |

@@ -5,8 +5,9 @@
   uv run python sttm-agent/run.py pipeline  run the pipeline once
   uv run python sttm-agent/run.py demo      incremental demo: batch 2 + a pipeline SQL change, then re-run
   uv run python sttm-agent/run.py export    re-export CSV/Markdown from the STTM table
+  uv run python sttm-agent/run.py demo-dashboard  create/update + publish the "STTM demo - Sales" dashboard, run it once
   uv run python sttm-agent/run.py app-deploy  deploy the agent as a job and the viewer app (app/) as a Databricks App
-  uv run python sttm-agent/run.py destroy   delete the app, the job and the pipeline, drop the sttm_* schemas
+  uv run python sttm-agent/run.py destroy   delete the app, the job, the demo dashboard and the pipeline, drop the sttm_* schemas
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import argparse
 import json
 import os
 
-from sttm import agent, medallion, viewer_app
+from sttm import agent, demo_dashboard, medallion, viewer_app
 from sttm.config import (CATALOG, META, PIPELINE_DIR, SCHEMAS, STATE_FILE, client, fq, load_state, pick_warehouse,
                          run_sql, save_state)
 
@@ -51,7 +52,8 @@ def print_flows(res: dict) -> None:
 
 def print_summary(s: dict) -> None:
     keys = ["tables_processed", "rows_inserted", "rows_updated", "rows_deactivated", "rows_unchanged", "llm_calls",
-            "comments_written", "tags_written", "open_issues", "issues_new", "issues_closed", "uc_edges_new", "sttm_version", "seconds"]
+            "comments_written", "tags_written", "open_issues", "issues_new", "issues_closed", "uc_edges_new", "consumer_edges_seen",
+            "consumers_resolved", "sttm_version", "seconds"]
     print("   " + ", ".join(f"{k}={s.get(k)}" for k in keys if k in s))
 
 
@@ -162,9 +164,21 @@ def cmd_app_deploy(w, a) -> None:
     print(f"   {app.name}: {app.url}")
 
 
+def cmd_demo_dashboard(w, a) -> None:
+    state = load_state(w)
+    show(f"1. dashboard '{demo_dashboard.NAME}' on gold.daily_sales and gold.customer_360")
+    did, url = demo_dashboard.ensure(w, state)
+    save_state(w, demo_dashboard_id=did)
+    print(f"   published: {url}")
+    show("2. run its queries once, so Unity Catalog records the dashboard as a reader (lineage lands ~15-20 min later)")
+    demo_dashboard.refresh(w, did, state["warehouse_id"])
+    print("   then `run.py agent` (or Run agent in the app) lists it under Used by")
+
+
 def cmd_destroy(w, a) -> None:
     state = load_state(w, required=False)
     viewer_app.delete(w, state)
+    demo_dashboard.delete(w, state)
     if state.get("pipeline_id"):
         w.pipelines.delete(state["pipeline_id"])
         print(f"   deleted pipeline {state['pipeline_id']}")
@@ -180,7 +194,7 @@ def cmd_destroy(w, a) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["setup", "agent", "pipeline", "demo", "export", "app-deploy", "destroy"])
+    p.add_argument("command", choices=["setup", "agent", "pipeline", "demo", "export", "demo-dashboard", "app-deploy", "destroy"])
     p.add_argument("--full", action="store_true", help="agent: reprocess every table; pipeline: full refresh")
     p.add_argument("--dry-run", action="store_true", help="agent: show what would change, write nothing")
     # used by the agent job, which has no sttm_state.json and no local output folder

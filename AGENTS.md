@@ -24,7 +24,7 @@ Diagrams of both flows: `docs/embed-flows.html`.
 schemas (`<catalog>.sttm_*`). The same rules apply: no workspace-specific values in code, and re-runs must be
 safe. It shares only `pyproject.toml` with the dashboard POC. Run it with `uv run python sttm-agent/run.py <command>`.
 Its viewer app (`sttm-agent/app/`, run with `uv run python sttm-agent/app/app.py`, port 8001) reads `sttm_export`,
-`agent_runs`, `glossary`, `sensitivity_overrides`, `owners`, `issues` and `issue_status` as its service principal, plus
+`agent_runs`, `glossary`, `sensitivity_overrides`, `owners`, `issues`, `issue_status` and `consumers` as its service principal, plus
 the change data feed of `sttm`, `glossary`, `sensitivity_overrides`, `issues` and `issue_status` for its History tab and
 audit workbook (`table_changes` needs only SELECT; keep change data feed on for those tables, and keep the service
 principal read-only). Writes to `glossary` (steward decisions), `sensitivity_overrides` (personal data levels) and
@@ -32,7 +32,10 @@ principal read-only). Writes to `glossary` (steward decisions), `sensitivity_ove
 the app, decides who may write. Personal data is classified from column names and the pipeline SQL only: never read or
 send data values (see "Personal data" in `sttm-agent/README.md`). Owner emails live only in the `owners` table (looked up with
 the SDK at run time): never put them in committed files. The per-team SQL alerts are created by `run.py app-deploy`;
-it must not change workspace-wide settings such as notification destinations.
+it must not change workspace-wide settings such as notification destinations. Downstream consumers come from
+`system.access.table_lineage`, filtered to this workspace (`workspace_id`); never store who ran an ad hoc query
+(`created_by`). The demo dashboard "STTM demo - Sales" is the only dashboard `run.py` creates, updates or trashes (by the
+id in `sttm_state.json` or by name in `/Workspace/Users/<you>/sttm-agent/dashboards`); leave every other dashboard alone.
 
 ## Layout
 

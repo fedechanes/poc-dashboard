@@ -4,8 +4,8 @@ Safe to re-run: creates the job and the app once, then updates and redeploys the
 - The agent job runs `run.py agent` on serverless compute as the person who deploys (it writes comments and tags,
   reads system tables and calls the LLM, so it keeps the deployer's permissions).
 - The app runs as its own service principal. It can use the SQL warehouse, start the agent job (CAN_MANAGE_RUN),
-  and read eight tables: sttm_export, sttm (its change data feed, for History), agent_runs, glossary,
-  sensitivity_overrides, owners, issues and issue_status. Nothing else.
+  and read nine tables: sttm_export, sttm (its change data feed, for History), agent_runs, glossary,
+  sensitivity_overrides, owners, issues, issue_status and consumers (what reads the medallion). Nothing else.
 - Steward and owner actions run as the signed-in user (user authorization, `sql` scope). The stewards group
   (STTM_STEWARDS_GROUP, default sttm-stewards) gets SELECT + MODIFY on glossary, sensitivity_overrides and
   issue_status; the members of each
@@ -57,6 +57,11 @@ def _user_dir(w: WorkspaceClient) -> str:
     return f"/Workspace/Users/{w.current_user.me().user_name}/sttm-agent"
 
 
+def _shown(path: str) -> str:
+    """A workspace path for the console, without the user name (an email) in it."""
+    return "/Workspace/Users/<you>/" + path.split("/", 4)[4] if path.startswith("/Workspace/Users/") else path
+
+
 def _upload(w: WorkspaceClient, base: str, files: dict[str, str]) -> None:
     for d in sorted({f"{base}/{name}".rsplit("/", 1)[0] for name in files}):
         w.workspace.mkdirs(d)
@@ -100,12 +105,12 @@ def ensure_agent_job(w: WorkspaceClient, state: dict, alerts: dict[str, str] | N
     if job_id:
         try:
             w.jobs.reset(int(job_id), settings)
-            log(f"   updated job {JOB_NAME} ({job_id}); agent code in {base}")
+            log(f"   updated job {JOB_NAME} ({job_id}); agent code in {_shown(base)}")
             return int(job_id)
         except NotFound:
             pass
     job_id = w.jobs.create(**settings.as_shallow_dict()).job_id
-    log(f"   created job {JOB_NAME} ({job_id}); agent code in {base}")
+    log(f"   created job {JOB_NAME} ({job_id}); agent code in {_shown(base)}")
     return job_id
 
 
@@ -230,7 +235,7 @@ def ensure_app(w: WorkspaceClient, warehouse_id: str, job_id: int, log=print) ->
 # sttm: the History tab reads its change data feed (table_changes needs SELECT on the table); the other history
 # tables (glossary, issues, issue_status) are read already
 APP_READS = ("sttm_export", "sttm", "agent_runs", "glossary", "sensitivity_overrides", "owners", "issues",
-             "issue_status")
+             "issue_status", "consumers")
 
 
 def grant_read(w: WorkspaceClient, app: A.App, log=print) -> None:
@@ -280,7 +285,7 @@ def deploy(w: WorkspaceClient, state: dict, log=print) -> tuple[A.App, int, dict
     grant_read(w, app, log)
     path = f"{_user_dir(w)}/app"
     _upload(w, path, {f: (APP_DIR / f).read_text() for f in APP_FILES} | {"app.yaml": _app_yaml()})
-    log(f"   uploaded app/ to {path}; deploying")
+    log(f"   uploaded app/ to {_shown(path)}; deploying")
     dep = w.apps.deploy(APP_NAME, A.AppDeployment(source_code_path=path)).result()
     status = dep.status.state.value if dep.status and dep.status.state else "unknown"
     log(f"   deployment {status}: {dep.status.message if dep.status else ''}")
