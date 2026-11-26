@@ -1,6 +1,7 @@
-# Curated business metadata. This is the governed source: it wins over drafted definitions and
-# over existing comments, and the agent writes it back as the column comment.
-# Keys are <layer>.<table>.<column>. Edit, re-run the agent: only the changed columns are rewritten.
+# Curated business metadata.
+# [owners] is read on every run. [definitions] only seeds the <prefix>_meta.glossary table on the first run;
+# after that stewards approve and edit definitions in the viewer app (or in that table), and the table wins over
+# drafted definitions and existing comments. Keys are <layer>.<table>.<column>.
 
 [owners]
 # Data owner / steward per layer; "<layer>.<table>" keys override a layer.

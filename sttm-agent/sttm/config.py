@@ -8,8 +8,11 @@ Real environment variables win over the file.
   STTM_CATALOG           catalog for all schemas (default: workspace)
   STTM_PREFIX            schema prefix (default: sttm -> sttm_landing, sttm_bronze, ...)
   STTM_PIPELINE_NAME     Lakeflow pipeline name (default: sttm-medallion)
+  STTM_PIPELINE_ID       pipeline id when there is no sttm_state.json (the agent job passes it as --pipeline-id)
   STTM_LLM_ENDPOINT      chat endpoint for drafting definitions (default: databricks-qwen3-next-80b-a3b-instruct,
                          'none' = deterministic rule-based fallback, no LLM)
+  STTM_DEFAULT_OWNER     user name (email) that every owner team in glossary.toml maps to when it is first added to
+                         the owners table (default: the user running the agent or the deploy)
 
 Workspace-specific ids (pipeline id, warehouse id, host) live in sttm_state.json (gitignored).
 """
@@ -47,6 +50,7 @@ CATALOG = os.getenv("STTM_CATALOG", "workspace")
 PREFIX = os.getenv("STTM_PREFIX", "sttm")
 PIPELINE_NAME = os.getenv("STTM_PIPELINE_NAME", "sttm-medallion")
 LLM_ENDPOINT = os.getenv("STTM_LLM_ENDPOINT", "databricks-qwen3-next-80b-a3b-instruct")
+DEFAULT_OWNER = os.getenv("STTM_DEFAULT_OWNER", "")
 
 LAYERS = ("bronze", "silver", "gold")
 SCHEMAS = {name: f"{PREFIX}_{name}" for name in ("landing", "bronze", "silver", "gold", "meta")}
@@ -80,6 +84,9 @@ def host_of(w: WorkspaceClient) -> str:
 
 
 def load_state(w: WorkspaceClient, required: bool = True) -> dict:
+    if not STATE_FILE.exists() and os.getenv("STTM_PIPELINE_ID"):
+        # running as a Databricks job: ids come from the job parameters (run.py --pipeline-id/--warehouse-id)
+        return {"pipeline_id": os.environ["STTM_PIPELINE_ID"], "warehouse_id": os.getenv("DATABRICKS_WAREHOUSE_ID", "")}
     if not STATE_FILE.exists():
         if required:
             raise SystemExit("sttm_state.json not found - run `uv run python sttm-agent/run.py setup` first.")

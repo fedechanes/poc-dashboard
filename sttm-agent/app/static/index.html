@@ -1,0 +1,949 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>STTM Viewer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wdth,wght@75..100,400..700&display=swap" rel="stylesheet">
+<style>
+/* Medallion metals encode the layers; verdigris (bronze patina) is the one interactive accent. */
+:root {
+  --paper: #eef1ef; --surface: #f8faf9; --ink: #18211f; --ink-2: #4c5856; --hair: #d5dcd9; --wash: #e4e9e7;
+  --verdigris: #1d6b62; --verdigris-wash: #d9ebe7;
+  --landing: #7d8986; --bronze: #9a5a2c; --silver: #75808d; --gold: #a98114;
+  --conflict: #b3261e; --conflict-wash: #f6dedb; --review: #8f5d00; --review-wash: #f4e7cc;
+  --gap: #6a4b9f; --gap-wash: #e8e1f3; --edge: #b9c3c0; --code-bg: #e7ece9;
+  --sans: "Instrument Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #141a19; --surface: #1a2221; --ink: #e2e8e6; --ink-2: #9daaa7; --hair: #2c3735; --wash: #222c2a;
+    --verdigris: #63b8ab; --verdigris-wash: #1d3532;
+    --landing: #7f8b88; --bronze: #d08a55; --silver: #a6b1be; --gold: #d9b44a;
+    --conflict: #ff8f84; --conflict-wash: #3b1f1c; --review: #e8b45a; --review-wash: #3a2d14;
+    --gap: #bea4ee; --gap-wash: #2b2340; --edge: #3c4a47; --code-bg: #202a28;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #141a19; --surface: #1a2221; --ink: #e2e8e6; --ink-2: #9daaa7; --hair: #2c3735; --wash: #222c2a;
+  --verdigris: #63b8ab; --verdigris-wash: #1d3532;
+  --landing: #7f8b88; --bronze: #d08a55; --silver: #a6b1be; --gold: #d9b44a;
+  --conflict: #ff8f84; --conflict-wash: #3b1f1c; --review: #e8b45a; --review-wash: #3a2d14;
+  --gap: #bea4ee; --gap-wash: #2b2340; --edge: #3c4a47; --code-bg: #202a28;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 15px/1.5 var(--sans); }
+button, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--verdigris); outline-offset: 2px; }
+.code, code { font-family: var(--mono); font-size: 13px; }
+.wrap { max-width: 1320px; margin: 0 auto; padding: 0 24px; }
+
+/* ---------- masthead ---------- */
+.mast { padding: 28px 0 8px; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 24px; }
+.mast h1 { margin: 0; font-size: 34px; line-height: 1.05; font-weight: 650; font-stretch: 78%; letter-spacing: -0.01em; }
+.mast p { margin: 6px 0 0; color: var(--ink-2); font-size: 14px; max-width: 80ch; }
+.mast .actions { margin-left: auto; display: flex; gap: 8px; }
+.btn { border: 1px solid var(--hair); background: var(--surface); border-radius: 6px; padding: 6px 12px; cursor: pointer; font-size: 14px; }
+.btn:hover { border-color: var(--verdigris); }
+.btn.primary { background: var(--verdigris); border-color: var(--verdigris); color: var(--surface); font-weight: 600; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn:disabled { cursor: default; opacity: .65; filter: none; }
+.agent-line { margin: 8px 0 0; font-size: 14px; max-width: 90ch; }
+.agent-line a { color: var(--verdigris); }
+.agent-line.failed { color: var(--conflict); }
+.agent-line.failed a { color: inherit; }
+.pulse { display: inline-block; width: 8px; height: 8px; margin-right: 8px; border-radius: 50%; background: var(--verdigris); vertical-align: 1px; }
+@media (prefers-reduced-motion: no-preference) { .pulse { animation: pulse 1.2s ease-in-out infinite; } @keyframes pulse { 50% { opacity: .25; } } }
+
+/* ---------- lineage map (the one bold element) ---------- */
+.map-frame { margin: 18px 0 8px; overflow-x: auto; }
+.map { position: relative; min-width: 760px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); column-gap: 64px; padding: 6px 2px 10px; }
+.map svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.map path { fill: none; stroke: var(--edge); stroke-width: 1.5; transition: stroke .25s, stroke-width .25s, opacity .25s; }
+.map path.lit { stroke: var(--verdigris); stroke-width: 2.25; }
+.map.focused path:not(.lit) { opacity: .35; }
+.lane { display: flex; flex-direction: column; gap: 10px; justify-content: center; position: relative; z-index: 1; }
+.lane h2 { margin: 0 0 4px; font-size: 13px; font-weight: 600; color: var(--ink); display: flex; align-items: center; gap: 8px; }
+.lane h2::before { content: ""; width: 18px; height: 6px; border-radius: 3px; background: var(--metal); }
+.node { text-align: left; background: var(--surface); border: 1px solid var(--hair); border-left: 5px solid var(--metal); border-radius: 4px 8px 8px 4px; padding: 7px 10px 8px; cursor: pointer; transition: border-color .2s, background .2s, opacity .2s; }
+.node:hover { border-color: var(--verdigris); border-left-color: var(--metal); }
+.node .nm { display: block; font-weight: 600; font-size: 15px; font-stretch: 85%; }
+.node .ct { display: flex; flex-wrap: wrap; gap: 0 10px; font-size: 12.5px; color: var(--ink-2); }
+.node .flag-n { color: var(--conflict); font-weight: 600; }
+.node.on { background: var(--verdigris-wash); border-color: var(--verdigris); border-left-color: var(--metal); }
+.map.focused .node:not(.lit):not(.on) { opacity: .5; }
+.node.landing { border-style: dashed; border-left-style: solid; }
+
+/* ---------- filter bar ---------- */
+.bar { position: sticky; top: 0; z-index: 5; background: var(--paper); padding: 12px 0 10px; border-bottom: 1px solid var(--hair); }
+.bar-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.seg { display: inline-flex; border: 1px solid var(--hair); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button { border: 0; background: none; padding: 6px 12px; cursor: pointer; font-size: 14px; }
+.seg button[aria-pressed="true"] { background: var(--ink); color: var(--paper); }
+.seg .n { font-variant-numeric: tabular-nums; opacity: .75; margin-left: 6px; }
+.field { flex: 1 1 220px; min-width: 0; padding: 7px 11px; border: 1px solid var(--hair); border-radius: 8px; background: var(--surface); font-size: 14px; }
+.field.dep { flex-basis: 280px; font-family: var(--mono); font-size: 13px; }
+.field.dep::placeholder { font-family: var(--sans); font-size: 14px; }
+details.dd { position: relative; }
+details.dd > summary { list-style: none; cursor: pointer; border: 1px solid var(--hair); border-radius: 8px; padding: 5px 10px; background: var(--surface); font-size: 14px; white-space: nowrap; }
+details.dd > summary::-webkit-details-marker { display: none; }
+details.dd > summary::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 8px; border-right: 1.5px solid var(--ink-2); border-bottom: 1.5px solid var(--ink-2); transform: translateY(-3px) rotate(45deg); }
+details.dd[open] > summary { border-color: var(--verdigris); }
+details.dd.active > summary { border-color: var(--verdigris); background: var(--verdigris-wash); }
+.menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 10; min-width: 220px; max-width: min(340px, 86vw); max-height: 340px; overflow: auto; background: var(--surface); border: 1px solid var(--hair); border-radius: 8px; padding: 6px; box-shadow: 0 8px 24px rgba(20, 30, 28, .14); }
+.menu label { display: flex; gap: 8px; align-items: center; padding: 5px 6px; border-radius: 5px; cursor: pointer; font-size: 14px; }
+.menu label:hover { background: var(--wash); }
+.menu .n { margin-left: auto; padding-left: 10px; color: var(--ink-2); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.menu input { accent-color: var(--verdigris); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+.chips:empty { display: none; }
+.chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--verdigris); color: var(--verdigris); border-radius: 999px; padding: 1px 4px 1px 10px; font-size: 13px; }
+.chip button { border: 0; background: none; color: inherit; cursor: pointer; padding: 0 5px; font-size: 15px; line-height: 1; }
+.linkish { border: 0; background: none; color: var(--verdigris); cursor: pointer; font-size: 13px; padding: 2px 4px; text-decoration: underline; text-underline-offset: 2px; }
+.summary { margin: 14px 0 6px; color: var(--ink-2); font-size: 14px; }
+.summary b { color: var(--ink); font-weight: 600; }
+
+/* ---------- ledger ---------- */
+.tbl { margin: 18px 0 30px; }
+.tbl-head { display: grid; grid-template-columns: 6px minmax(0, 1fr); column-gap: 14px; margin-bottom: 4px; }
+.tbl-head::before { content: ""; grid-row: 1 / span 3; background: var(--metal); border-radius: 3px; }
+.tbl-head > * { grid-column: 2; }
+.tbl-head h3 { margin: 0; font-size: 22px; font-weight: 650; font-stretch: 80%; line-height: 1.2; }
+.fold { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 10px; border-radius: 4px; }
+.fold:focus-visible { outline: 2px solid var(--verdigris); outline-offset: 3px; }
+.fold::before { content: ""; width: 7px; height: 7px; border-right: 2px solid var(--ink-2); border-bottom: 2px solid var(--ink-2); transform: rotate(-45deg); transition: transform .15s; }
+.fold[aria-expanded="true"]::before { transform: translateY(-3px) rotate(45deg); }
+.fold:hover .nm { text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 4px; }
+.tbl.collapsed { margin: 0; padding: 12px 0; border-bottom: 1px solid var(--hair); }
+.tbl.collapsed .tbl-head { margin: 0; }
+.tbl-head .who b { color: var(--conflict); font-weight: 600; }
+.summary .linkish { margin-left: 6px; }
+.tbl-head h3 .layer { color: var(--ink-2); font-weight: 500; }
+.tbl-head .who { color: var(--ink-2); font-size: 13.5px; }
+.tbl-head .rule { font-size: 13px; color: var(--ink-2); margin-top: 2px; max-width: 110ch; }
+.tbl-head .rule code { color: var(--ink); background: var(--code-bg); padding: 1px 5px; border-radius: 4px; white-space: pre-wrap; word-break: break-word; }
+.cols { list-style: none; margin: 10px 0 0; padding: 0; border-top: 1px solid var(--hair); }
+.cols > li { border-bottom: 1px solid var(--hair); }
+.line { all: unset; box-sizing: border-box; width: 100%; display: grid; grid-template-columns: minmax(150px, 1fr) minmax(150px, 1.15fr) minmax(220px, 2.6fr) minmax(110px, auto); gap: 16px; padding: 11px 8px; cursor: pointer; align-items: start; }
+.line:hover { background: var(--wash); }
+.line:focus-visible { outline: 2px solid var(--verdigris); outline-offset: -2px; }
+li.open > .line { background: var(--wash); }
+.cn { font-family: var(--mono); font-weight: 500; font-size: 13.5px; word-break: break-word; }
+.ty { display: block; color: var(--ink-2); font-size: 12.5px; margin-top: 1px; }
+.from { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); word-break: break-word; }
+.from i { font-family: var(--sans); font-size: 13px; }
+.def { font-size: 14.5px; max-width: 72ch; }
+.def .none { color: var(--conflict); }
+.src { display: inline-block; margin-left: 6px; font-size: 12px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--hair); color: var(--ink-2); white-space: nowrap; vertical-align: 1px; }
+.src.glossary { border-color: var(--verdigris); color: var(--verdigris); background: var(--verdigris-wash); }
+.src.draft { border-style: dashed; border-color: var(--review); color: var(--review); }
+.flags { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; }
+.flag { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 4px; white-space: nowrap; background: var(--wash); color: var(--ink-2); }
+.flag.conflict { background: var(--conflict-wash); color: var(--conflict); }
+.flag.fix { background: transparent; color: var(--conflict); box-shadow: inset 0 0 0 1px var(--conflict); }
+.flag.review { background: var(--review-wash); color: var(--review); }
+.flag.lineage { background: transparent; color: var(--review); box-shadow: inset 0 0 0 1px var(--review); }
+.flag.gap { background: var(--gap-wash); color: var(--gap); }
+
+/* ---------- detail ---------- */
+.detail { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 20px 36px; padding: 6px 8px 22px; }
+@media (prefers-reduced-motion: no-preference) {
+  .detail { animation: reveal .18s ease-out; }
+  @keyframes reveal { from { opacity: 0; transform: translateY(-4px); } }
+}
+.detail h4 { margin: 14px 0 6px; font-size: 14px; font-weight: 600; }
+.detail > div > h4:first-child { margin-top: 6px; }
+pre.sql { margin: 0; background: var(--code-bg); padding: 10px 12px; border-radius: 6px; white-space: pre-wrap; word-break: break-word; font: 13px/1.55 var(--mono); }
+pre.sql .k { color: var(--verdigris); font-weight: 500; }
+pre.sql .s { color: var(--bronze); }
+pre.sql .n { color: var(--gap); }
+.issue { border-left: 3px solid var(--tone); padding: 4px 0 4px 10px; margin-bottom: 8px; font-size: 14px; max-width: 72ch; }
+.issue b { color: var(--tone); font-weight: 600; margin-right: 4px; }
+.suggest { background: var(--verdigris-wash); border-radius: 6px; padding: 10px 12px; font-size: 14px; max-width: 72ch; }
+.suggest .btn { margin-top: 8px; font-size: 13px; padding: 3px 10px; }
+ol.ladder { list-style: none; margin: 0; padding: 0; position: relative; }
+ol.ladder::before { content: ""; position: absolute; left: 5px; top: 10px; bottom: 12px; width: 2px; background: var(--hair); }
+ol.ladder li { position: relative; padding: 3px 0 7px 24px; }
+ol.ladder li::before { content: ""; position: absolute; left: 0; top: 8px; width: 12px; height: 12px; border-radius: 50%; background: var(--metal); box-shadow: 0 0 0 3px var(--paper); }
+ol.ladder .t { font-size: 14px; font-weight: 600; }
+ol.ladder .c { display: block; font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); word-break: break-word; }
+.colref { all: unset; cursor: pointer; font-family: var(--mono); font-size: 12.5px; color: var(--verdigris); border-bottom: 1px dotted var(--verdigris); }
+.colref:focus-visible { outline: 2px solid var(--verdigris); }
+.steward { border: 1px solid var(--hair); border-radius: 6px; padding: 10px 12px; max-width: 72ch; font-size: 14px; }
+.steward p { margin: 0 0 8px; color: var(--ink-2); }
+.steward .acts { display: flex; flex-wrap: wrap; gap: 6px; }
+.steward .btn { font-size: 13px; padding: 3px 10px; }
+.steward textarea { width: 100%; min-height: 88px; box-sizing: border-box; font-family: inherit; font-size: 14px; line-height: 1.45; color: var(--ink); background: var(--paper); border: 1px solid var(--hair); border-radius: 6px; padding: 8px; margin-bottom: 8px; }
+.steward textarea:focus-visible { outline: 2px solid var(--verdigris); outline-offset: 1px; }
+.steward .msg { margin: 8px 0 0; font-size: 13px; }
+.steward .msg.err { color: var(--conflict); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.pending { display: inline-block; margin-left: 6px; font-size: 11.5px; font-weight: 600; padding: 1px 7px; border-radius: 999px; color: var(--verdigris); border: 1px dashed var(--verdigris); vertical-align: 1px; }
+.refs { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.meta { font-size: 13.5px; color: var(--ink-2); margin: 0; }
+.meta dt { float: left; clear: left; width: 110px; }
+.meta dd { margin: 0 0 4px 110px; color: var(--ink); }
+.row-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+
+/* ---------- issue status and worklist ---------- */
+.st { display: inline-block; font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; border: 1px solid var(--hair); color: var(--ink-2); }
+.st.in_progress { border-color: var(--verdigris); color: var(--verdigris); }
+.st.accepted, .st.wont_fix { background: var(--wash); }
+.new { display: inline-block; font-size: 11.5px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; padding: 1px 7px; border-radius: 4px; background: var(--verdigris); color: var(--surface); }
+.triage { margin: 6px 0 2px; display: grid; grid-template-columns: minmax(120px, auto) minmax(140px, 1fr) minmax(180px, 2fr) auto; gap: 6px; align-items: center; max-width: 900px; }
+.triage select, .triage input { min-width: 0; font-size: 13.5px; padding: 4px 8px; border: 1px solid var(--hair); border-radius: 6px; background: var(--paper); color: var(--ink); }
+.triage .btn { font-size: 13px; padding: 3px 10px; }
+.triage-who { font-size: 12.5px; color: var(--ink-2); margin: 2px 0 0; }
+.triage-who.err { color: var(--conflict); }
+.issue .triage-line { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; font-size: 13px; color: var(--ink-2); }
+.work-head { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; margin: 14px 0 4px; color: var(--ink-2); font-size: 14px; }
+.work-head b { color: var(--ink); font-weight: 600; }
+ul.work { list-style: none; margin: 8px 0 0; padding: 0; border-top: 1px solid var(--hair); }
+ul.work > li { border-bottom: 1px solid var(--hair); padding: 12px 8px; }
+ul.work > li.is-new { box-shadow: inset 3px 0 0 var(--verdigris); }
+.wi-top { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.wi-text { margin: 4px 0 6px; font-size: 14px; max-width: 90ch; }
+.flags .st { font-weight: 500; }
+@media (max-width: 860px) { .triage { grid-template-columns: minmax(0, 1fr); } }
+
+#rows[aria-busy="true"] { opacity: .55; transition: opacity .15s .1s; }
+.state { margin: 30px 0; padding: 26px; border: 1px dashed var(--hair); border-radius: 8px; color: var(--ink-2); max-width: 70ch; }
+.state.err { color: var(--conflict); border-color: var(--conflict); }
+.state .btn { margin-top: 10px; }
+
+@media (max-width: 860px) {
+  .wrap { padding: 0 16px; }
+  .mast h1 { font-size: 28px; }
+  .mast .actions { margin-left: 0; }
+  .line { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .flags { justify-content: flex-start; }
+  .detail { grid-template-columns: minmax(0, 1fr); }
+  .bar { position: static; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="mast">
+    <div>
+      <h1>Source-to-target mapping</h1>
+      <p id="source">Reading the mapping…</p>
+      <p class="agent-line" id="agentLine" aria-live="polite" hidden></p>
+      <p class="agent-line" id="pendingLine" aria-live="polite" hidden></p>
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="runAgent" hidden title="Runs the STTM agent as a Databricks job. It reads the deployed pipeline and Unity Catalog, updates the mapping, and writes column comments and tags where they changed.">Run agent</button>
+      <button class="btn" id="csv" title="Save the rows on screen as a CSV file">Download CSV</button>
+      <button class="btn" id="refresh" title="Read the table again (results are otherwise cached for a minute)">Refresh</button>
+    </div>
+  </header>
+
+  <section class="map-frame" aria-label="Lineage map. Select a table to filter on it.">
+    <div class="map" id="map"></div>
+  </section>
+
+  <div class="bar">
+    <div class="bar-row">
+      <div class="seg" role="group" aria-label="Show">
+        <button id="allBtn" aria-pressed="true">All columns<span class="n" id="nAll"></span></button>
+        <button id="reviewBtn" aria-pressed="false">Needs review<span class="n" id="nOpen"></span></button>
+        <button id="workBtn" aria-pressed="false" title="Open issues on the tables your teams own">My worklist<span class="n" id="nWork"></span></button>
+      </div>
+      <input class="field" id="q" type="search" placeholder="Search names, definitions and SQL" aria-label="Search names, definitions and SQL">
+      <input class="field dep" id="dep" type="search" list="cols" placeholder="Show what depends on a column or table" aria-label="Show what depends on a column or table">
+      <datalist id="cols"></datalist>
+    </div>
+    <div class="bar-row" id="menus" style="margin-top:8px"></div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <p class="summary" id="summary" aria-live="polite"></p>
+  <main id="rows"><div class="state">Reading the mapping…</div></main>
+</div>
+
+<script>
+const MENUS = [
+  ["issue", "Issue type"], ["layer", "Layer"], ["owner", "Owner"], ["definition_source", "Definition source"],
+  ["kind", "Mapping"], ["origin", "Lineage origin"], ["run", "Changed in run"], ["data_type", "Data type"],
+];
+const LAYERS = ["landing", "bronze", "silver", "gold"];
+const ISSUE = {   // type -> [label, css class, tone variable]
+  CONFLICT: ["Conflict", "conflict", "--conflict"], REVIEW: ["Review", "review", "--review"], GAP: ["Gap", "gap", "--gap"],
+  "FIX IN PIPELINE SQL": ["Fix in pipeline SQL", "fix", "--conflict"], LINEAGE: ["Lineage mismatch", "lineage", "--review"],
+  INFO: ["Info", "", "--ink-2"],
+};
+const SOURCE = { glossary: "Glossary", pipeline_sql: "Pipeline SQL", uc_comment: "UC comment", inherited: "Inherited", llm: "LLM draft", rule: "Rule draft" };
+const KIND = { direct: "Direct copy", derived: "Derived", constant: "Constant", technical: "Technical" };
+const STATUS = { open: "Open", in_progress: "In progress", accepted: "Accepted", wont_fix: "Won't fix" };
+const state = { filters: {}, q: "", depends_on: "", open: null, view: "ledger" };
+const fold = {};   // table -> true (expanded) / false (collapsed), set by the user; otherwise the default below
+let meta = null, rows = [], timer = null, seq = 0;
+let me = null, gloss = {}, editing = null, stewardMsg = null, allRows = {};   // signed-in user, steward decisions by column key
+let issues = [], owners = [], issueMsg = null, showClosed = false, allTeams = false;   // tracked issues + owner statuses
+let prevVisit;   // ms of the previous visit (undefined = not read yet, null = first visit)
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const cssEsc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, "\\$&"));
+const split = (s) => (s ? s.split("; ").filter(Boolean) : []);
+const issueType = (i) => i.split(":")[0].trim();
+const layerOf = (name) => (name.startsWith("landing/") ? "landing" : name.split(".")[0]);
+const tableOf = (col) => col.replace(/\.[^.]+$/, "");
+const fmtRun = (r) => {
+  if (!r) return "";
+  const d = new Date(`${r.slice(0, 4)}-${r.slice(4, 6)}-${r.slice(6, 8)}T${r.slice(9, 11)}:${r.slice(11, 13)}:00Z`);
+  return d.toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) + " UTC";
+};
+const label = (key, v) => key === "issue" ? (v === "OPEN" ? "Needs review" : v === "NONE" ? "No issues" : (ISSUE[v]?.[0] || v))
+  : key === "definition_source" ? (SOURCE[v] || v) : key === "kind" ? (KIND[v] || v) : key === "run" ? fmtRun(v) : v;
+
+/* ---------- URL state ---------- */
+function readUrl() {
+  const p = new URLSearchParams(location.search);
+  for (const key of ["table", ...MENUS.map((m) => m[0])]) {
+    const v = p.getAll(key);
+    if (v.length) state.filters[key] = new Set(v);
+  }
+  state.q = p.get("q") || "";
+  state.depends_on = p.get("depends_on") || "";
+  state.open = p.get("open");
+  state.view = p.get("view") === "worklist" ? "worklist" : "ledger";
+  $("q").value = state.q;
+  $("dep").value = state.depends_on;
+}
+function params(extra = {}) {
+  const p = new URLSearchParams();
+  for (const [k, set] of Object.entries(state.filters)) for (const v of set) p.append(k, v);
+  if (state.q) p.set("q", state.q);
+  if (state.depends_on) p.set("depends_on", state.depends_on);
+  for (const [k, v] of Object.entries(extra)) p.set(k, v);
+  return p;
+}
+function syncUrl() {
+  const p = params({ ...(state.open ? { open: state.open } : {}), ...(state.view === "worklist" ? { view: "worklist" } : {}) });
+  history.replaceState(null, "", p.toString() ? `?${p}` : location.pathname);
+}
+async function getJson(url) {
+  const r = await fetch(url);
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).detail || msg; } catch (e) { /* not JSON */ }
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+/* ---------- metadata ---------- */
+async function loadMeta(refresh = false) {
+  meta = await getJson(`api/facets${refresh ? "?refresh=true" : ""}`);
+  const s = meta.stats;
+  $("source").innerHTML = `${esc(s.columns)} target columns in ${esc(s.tables)} tables, read from <code>${esc(meta.table_name)}</code>. The agent last changed it on ${esc(fmtRun(s.last_run))}.`;
+  $("nAll").textContent = s.columns;
+  $("nOpen").textContent = s.open_issues;
+  const tables = new Set(meta.columns.map(tableOf));
+  $("cols").innerHTML = [...tables, ...meta.columns].map((c) => `<option value="${esc(c)}">`).join("");
+  renderMenus();
+}
+
+/* ---------- lineage map ---------- */
+function mapModel() {
+  const nodes = {};
+  for (const t of meta.tables) nodes[t.target_table] = { ...t };
+  for (const e of meta.edges) for (const n of [e.source, e.target]) if (!nodes[n]) nodes[n] = { target_table: n, layer: layerOf(n), columns: null, open_issues: 0 };
+  const lanes = Object.fromEntries(LAYERS.map((l) => [l, []]));
+  for (const n of Object.values(nodes)) if (lanes[n.layer]) lanes[n.layer].push(n.target_table);
+  // order each lane by the mean position of its upstream tables, so edges cross as little as possible
+  const pos = {};
+  lanes.landing.sort().forEach((n, i) => (pos[n] = i));
+  for (const l of LAYERS.slice(1)) {
+    const inLane = new Set(lanes[l]), memo = {};
+    const bary = (n, seen = new Set()) => {   // same-lane parents (e.g. customers_cleansed -> customers) sit just above
+      if (n in memo) return memo[n];
+      const ups = meta.edges.filter((e) => e.target === n);
+      const prior = ups.filter((e) => pos[e.source] != null && !inLane.has(e.source)).map((e) => pos[e.source]);
+      const sib = ups.find((e) => inLane.has(e.source) && !seen.has(e.source));
+      seen.add(n);
+      return (memo[n] = prior.length ? prior.reduce((a, b) => a + b, 0) / prior.length
+        : sib ? bary(sib.source, seen) + 0.01 : 99);
+    };
+    lanes[l].sort((a, b) => bary(a) - bary(b) || a.localeCompare(b));
+    lanes[l].forEach((n, i) => (pos[n] = i));
+  }
+  return { nodes, lanes };
+}
+function reach(start, dir) {
+  const out = new Set(), stack = [...start];
+  while (stack.length) {
+    const n = stack.pop();
+    for (const e of meta.edges) {
+      const [from, to] = dir === "down" ? [e.source, e.target] : [e.target, e.source];
+      if (from === n && !out.has(to)) { out.add(to); stack.push(to); }
+    }
+  }
+  return out;
+}
+let litNow = new Set();
+function renderMap() {
+  const { nodes, lanes } = mapModel();
+  const sel = state.filters.table || new Set();
+  const dep = state.depends_on ? (nodes[state.depends_on] ? state.depends_on : tableOf(state.depends_on)) : null;
+  let lit = new Set();
+  if (sel.size) lit = new Set([...sel, ...reach(sel, "up"), ...reach(sel, "down")]);
+  if (dep) lit = new Set([...lit, dep, ...reach([dep], "down")]);
+  litNow = lit;
+  const laneName = { landing: "Landed files", bronze: "Bronze", silver: "Silver", gold: "Gold" };
+  $("map").className = `map${lit.size ? " focused" : ""}`;
+  $("map").innerHTML = `<svg aria-hidden="true"></svg>` + LAYERS.map((l) => `
+    <div class="lane" style="--metal:var(--${l})"><h2>${laneName[l]}</h2>
+      ${lanes[l].map((n) => {
+        const t = nodes[n], name = l === "landing" ? n.slice(8) : n.split(".")[1];
+        const issues = +t.open_issues || 0;
+        const on = sel.has(n) || dep === n;
+        const title = l === "landing" ? `Show every column fed by the ${name} files` : `Show the columns of ${n}`;
+        return `<button class="node ${l === "landing" ? "landing" : ""} ${on ? "on" : ""} ${lit.has(n) ? "lit" : ""}" data-node="${esc(n)}" data-landing="${l === "landing" ? 1 : ""}" title="${esc(title)}" aria-pressed="${on}">
+          <span class="nm">${esc(name)}</span>
+          <span class="ct">${t.columns != null ? `<span>${esc(t.columns)} columns</span>` : "<span>source files</span>"}${issues ? `<span class="flag-n">${issues} to review</span>` : ""}</span>
+        </button>`;
+      }).join("")}
+    </div>`).join("");
+  drawEdges();
+}
+function drawEdges() {
+  const map = $("map"), svg = map.querySelector("svg");
+  if (!svg || !meta) return;
+  const box = map.getBoundingClientRect();
+  const at = (n) => map.querySelector(`[data-node="${cssEsc(n)}"]`)?.getBoundingClientRect();
+  svg.innerHTML = meta.edges.map((e) => {
+    const a = at(e.source), b = at(e.target);
+    if (!a || !b || !a.width) return "";
+    const on = litNow.has(e.source) && litNow.has(e.target);
+    const y1 = a.top + a.height / 2 - box.top, y2 = b.top + b.height / 2 - box.top;
+    if (Math.abs(a.left - b.left) < 4) {   // both tables in the same lane: loop out to the right
+      const x = a.right - box.left, bulge = 26;
+      return `<path class="${on ? "lit" : ""}" d="M${x},${y1} C${x + bulge},${y1} ${x + bulge},${y2} ${x},${y2}"/>`;
+    }
+    const x1 = a.right - box.left, x2 = b.left - box.left;
+    const dx = Math.max(24, (x2 - x1) / 2);
+    return `<path class="${on ? "lit" : ""}" d="M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}"/>`;
+  }).join("");
+}
+if (window.ResizeObserver) new ResizeObserver(() => drawEdges()).observe($("map"));
+document.fonts?.ready.then(() => drawEdges());
+
+/* ---------- filter menus ---------- */
+function renderMenus() {
+  const openKey = document.querySelector("details.dd[open]")?.dataset.key;
+  $("menus").innerHTML = MENUS.map(([key, title]) => {
+    let items = (meta.facets[key] || []).map((f) => ({ value: f.value, n: f.n }));
+    if (key === "issue") items = [{ value: "NONE" }, ...items.filter((i) => i.value !== "INFO"), ...items.filter((i) => i.value === "INFO")];
+    if (!items.length) return "";
+    const sel = state.filters[key] || new Set();
+    const shown = [...sel].filter((v) => v !== "OPEN");
+    return `<details class="dd ${shown.length ? "active" : ""}" data-key="${key}" ${openKey === key ? "open" : ""}>
+      <summary>${esc(title)}${shown.length ? `: ${shown.length === 1 ? esc(label(key, shown[0])) : shown.length}` : ""}</summary>
+      <div class="menu">${items.map((i) => `<label><input type="checkbox" data-f="${key}" value="${esc(i.value)}" ${sel.has(i.value) ? "checked" : ""}>
+        <span>${esc(label(key, i.value))}</span>${i.n != null ? `<span class="n">${i.n}</span>` : ""}</label>`).join("")}</div>
+    </details>`;
+  }).join("");
+}
+function renderChips() {
+  const chips = [];
+  for (const [k, set] of Object.entries(state.filters)) {
+    for (const v of set) {
+      if (k === "issue" && v === "OPEN") continue;
+      const name = k === "table" ? "Table" : MENUS.find((m) => m[0] === k)[1];
+      chips.push([k, v, `${name}: ${label(k, v)}`]);
+    }
+  }
+  if (state.q) chips.push(["q", state.q, `Search: ${state.q}`]);
+  if (state.depends_on) chips.push(["depends_on", state.depends_on, `Depends on ${state.depends_on}`]);
+  $("chips").innerHTML = chips.map(([k, v, l]) => `<span class="chip">${esc(l)}<button data-chip="${esc(k)}" data-v="${esc(v)}" aria-label="Remove filter ${esc(l)}">×</button></span>`).join("")
+    + (chips.length + ((state.filters.issue || new Set()).has("OPEN") ? 1 : 0) > 1 ? `<button class="linkish" data-chip="*">Clear all filters</button>` : "");
+  const review = (state.filters.issue || new Set()).has("OPEN"), work = state.view === "worklist";
+  $("allBtn").setAttribute("aria-pressed", String(!review && !work));
+  $("reviewBtn").setAttribute("aria-pressed", String(review && !work));
+  $("workBtn").setAttribute("aria-pressed", String(work));
+  for (const id of ["q", "dep", "menus", "chips"]) $(id).hidden = work;
+}
+
+/* ---------- ledger ---------- */
+function hl(sql) {   // light SQL colouring: keywords/functions (upper case), strings, numbers
+  return String(sql).split(/('(?:[^'\\]|\\.)*'|\b\d+(?:\.\d+)?\b|\b[A-Z][A-Z_0-9]+\b)/)
+    .map((t, i) => (i % 2 ? `<span class="${t[0] === "'" ? "s" : /^\d/.test(t) ? "n" : "k"}">${esc(t)}</span>` : esc(t))).join("");
+}
+function flagHtml(t) {
+  const [name, cls] = ISSUE[t] || [t, ""];
+  return `<span class="flag ${cls}">${esc(name)}</span>`;
+}
+function srcBadge(s) {
+  const draft = s === "llm" || s === "rule";
+  return `<span class="src ${s === "glossary" ? "glossary" : ""} ${draft ? "draft" : ""}" title="${draft ? "Drafted automatically. Nobody has confirmed it yet." : "Where this definition comes from"}">${esc(SOURCE[s] || s || "No source")}</span>`;
+}
+function renderRows() {
+  const n = rows.length, tables = new Set(rows.map((r) => r.target_table)).size;
+  const open = rows.filter((r) => r.has_open_issue === "true").length;
+  const drafts = rows.filter((r) => ["llm", "rule"].includes(r.definition_source)).length;
+  $("summary").innerHTML = n
+    ? `Showing <b>${n}</b> column${n > 1 ? "s" : ""} in <b>${tables}</b> table${tables > 1 ? "s" : ""}. <b>${open}</b> need${open === 1 ? "s" : ""} review, and <b>${drafts}</b> definition${drafts === 1 ? " is a draft" : "s are drafts"} nobody has confirmed yet.`
+    : "";
+  if (!n) {
+    const onlyDep = state.depends_on && !Object.keys(state.filters).length && !state.q;
+    $("rows").innerHTML = `<div class="state">${onlyDep
+      ? `Nothing in the mapping reads from <code>${esc(state.depends_on)}</code>.`
+      : "No columns match these filters."}<br><button class="btn" data-chip="*">Clear filters</button></div>`;
+    return;
+  }
+  const groups = {};
+  for (const r of rows) (groups[r.target_table] ||= []).push(r);
+  const anyOpen = Object.keys(groups).some(isExpanded);
+  $("summary").innerHTML += ` <button class="linkish" data-foldall="${anyOpen ? "collapse" : "expand"}">${anyOpen ? "Collapse all tables" : "Expand all tables"}</button>`;
+  $("rows").innerHTML = Object.entries(groups).map(([t, rs]) => {
+    const r0 = rs[0], [layer, name] = t.split(".");
+    const expanded = isExpanded(t), toReview = rs.filter((r) => r.has_open_issue === "true").length;
+    return `<section class="tbl ${expanded ? "" : "collapsed"}" style="--metal:var(--${layer})">
+      <div class="tbl-head">
+        <h3><button class="fold" data-fold="${esc(t)}" aria-expanded="${expanded}" aria-controls="cols-${esc(t)}">
+          <span class="nm"><span class="layer">${esc(layer)}</span>.${esc(name)}</span></button></h3>
+        <div class="who">${rs.length} column${rs.length > 1 ? "s" : ""}${toReview ? `, <b>${toReview} to review</b>` : ""}. Owned by ${esc(r0.owner)}. In Unity Catalog as <code>${esc(r0.uc_table)}</code>.</div>
+        ${expanded && r0.table_rule ? `<div class="rule">Applies to every column: <code>${esc(r0.table_rule)}</code></div>` : ""}
+      </div>
+      ${expanded ? `<ul class="cols" id="cols-${esc(t)}">${rs.map(rowHtml).join("")}</ul>` : ""}
+    </section>`;
+  }).join("");
+  const el = state.open && document.querySelector(`li[data-key="${cssEsc(state.open)}"]`);
+  if (el && el.dataset.scrolled !== "1") { el.scrollIntoView?.({ block: "center" }); el.dataset.scrolled = "1"; }
+}
+// Collapsed by default. A table opens on its own when you select it in the map or jump to one of its columns.
+function isExpanded(t) {
+  if (t in fold) return fold[t];
+  return (state.filters.table || new Set()).has(t) || (!!state.open && state.open.startsWith(t + "."));
+}
+function rowHtml(r) {
+  const key = `${r.target_table}.${r.target_column}`;
+  const flags = split(r.issue_types).filter((t) => t !== "INFO");
+  const srcs = split(r.source_columns);
+  const isOpen = state.open === key;
+  return `<li class="${isOpen ? "open" : ""}" data-key="${esc(key)}">
+    <button class="line" data-row="${esc(key)}" aria-expanded="${isOpen}">
+      <span><span class="cn">${esc(r.target_column)}</span><span class="ty">${esc(r.data_type)}, ${esc((KIND[r.mapping_kind] || r.mapping_kind || "").toLowerCase())}</span></span>
+      <span class="from">${srcs.length ? srcs.map(esc).join("<br>") : `<i>${r.mapping_kind === "constant" ? "Constant value" : "No source column"}</i>`}</span>
+      <span class="def">${r.business_definition ? esc(r.business_definition) : `<span class="none">No definition yet</span>`}${srcBadge(r.definition_source)}${pendingOf(r, key) ? `<span class="pending" title="A steward decided on this column. The agent applies it on its next run.">Pending</span>` : ""}</span>
+      <span class="flags">${flags.map(flagHtml).join("")}${[...new Set((issuesOf(key)).filter((i) => i.status !== "open").map((i) => i.status))].map((st) => `<span class="st ${st}" title="Status set by the owner">${STATUS[st]}</span>`).join("")}</span>
+    </button>
+    ${isOpen ? detailHtml(r, key) : ""}
+  </li>`;
+}
+function colRef(c) {
+  return c.startsWith("landing/") ? `<span class="code">${esc(c)}</span>` : `<button class="colref" data-goto="${esc(c)}">${esc(c)}</button>`;
+}
+function ladderHtml(path) {   // one rung per hop; tables read at the same hop share the rung
+  return `<ol class="ladder">${(path || "").split(" <- ").map((step, i) => {
+    const parts = step.split(" + ").map((part) => {
+      const m = part.match(/^(landing\/[^.]+|[^.]+\.[^.]+)\.(.*)$/);
+      return { table: m ? m[1] : part, cols: m ? m[2].replace(/^\{|\}$/g, "") : "", raw: part };
+    });
+    return `<li style="--metal:var(--${layerOf(parts[0].table)})">${parts.map((x) => i === 0
+      ? `<span class="t">This column</span><span class="c">${esc(x.raw)}</span>`
+      : `<span class="t">${esc(x.table)}</span><span class="c">${esc(x.cols)}</span>`).join("")}</li>`;
+  }).join("")}</ol>`;
+}
+function detailHtml(r, key) {
+  const issues = r.issues ? r.issues.split(" | ") : [];
+  const ruleCols = split(r.rule_columns);
+  return `<div class="detail">
+    <div>
+      <h4>How it is built</h4>
+      <pre class="sql">${hl(r.transformation || "—")}</pre>
+      ${r.table_rule ? `<h4>Table rule</h4><pre class="sql">${hl(r.table_rule)}</pre>` : ""}
+      ${ruleCols.length ? `<h4>Columns the table rule reads</h4><div class="refs">${ruleCols.map(colRef).join("")}</div>` : ""}
+      ${issues.length ? `<h4>What to review</h4>${issues.map((i) => {
+        const t = issueType(i), [name, , tone] = ISSUE[t] || [t, "", "--ink-2"];
+        const tracked = issuesOf(key).find((x) => x.issue_text === i);
+        return `<div class="issue" style="--tone:var(${tone})"><b>${esc(name)}.</b>${esc(i.slice(i.indexOf(":") + 1).trim())}${tracked ? triageHtml(tracked, true) : ""}</div>`;
+      }).join("")}` : ""}
+      ${r.proposed_definition ? `<h4>Suggested definition</h4><div class="suggest">${esc(r.proposed_definition)}<br>
+        <button class="btn" data-copy="${esc(r.proposed_definition)}">Copy suggestion</button></div>` : ""}
+      <h4>Steward decision</h4>${stewardHtml(r, key)}
+    </div>
+    <div>
+      <h4>Where it comes from</h4>
+      ${ladderHtml(r.lineage_path)}
+      <h4>Details</h4>
+      <dl class="meta">
+        <dt>Lineage origin</dt><dd>${esc(r.lineage_origin)}</dd>
+        <dt>First seen</dt><dd>${esc(fmtRun(r.first_seen_run))}</dd>
+        <dt>Last changed</dt><dd>${esc(fmtRun(r.last_changed_run))}</dd>
+      </dl>
+      <div class="row-actions">
+        ${r.layer !== "gold" ? `<button class="btn" data-impact="${esc(key)}">Show what depends on this column</button>` : ""}
+        <button class="btn" data-copy="${esc(r.uc_table)}.${esc(r.target_column)}">Copy full column name</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+/* ---------- steward decisions ---------- */
+// A decision is pending until the agent has applied it: the approved text isn't the glossary definition yet, or a
+// confirmed REVIEW is still listed.
+function pendingOf(r, key) {
+  const g = gloss[key];
+  if (!g) return null;
+  if (g.definition && (r.definition_source !== "glossary" || r.business_definition !== g.definition)) return "definition";
+  if (!g.definition && r.definition_source === "glossary") return "removed";
+  if (g.acknowledged_lineage_hash === r.lineage_hash && split(r.issue_types).includes("REVIEW")) return "ack";
+  return null;
+}
+function stewardHtml(r, key) {
+  const g = gloss[key], pend = pendingOf(r, key), hasReview = split(r.issue_types).includes("REVIEW");
+  const who = g ? `${g.definition ? "Approved" : "Confirmed"} by ${esc(g.updated_by)} on ${esc(fmtMs(Date.parse(g.updated_at)))}${g.note ? `: “${esc(g.note)}”` : ""}.` : "";
+  const status = pend === "definition" ? `${who} The agent writes it to Unity Catalog on its next run.`
+    : pend === "ack" ? `${who} The review closes on the next agent run.`
+    : pend === "removed" ? "Removed from the glossary. The agent drafts a new definition on its next run."
+    : g ? who : r.definition_source === "glossary" ? "In the glossary." : "Nobody has approved this definition yet.";
+  const msg = stewardMsg && stewardMsg.key === key ? `<p class="msg ${stewardMsg.err ? "err" : ""}" role="status">${esc(stewardMsg.text)}</p>` : "";
+  if (!me) return `<div class="steward"><p>Checking whether you can approve definitions…</p></div>`;
+  if (!me.steward) return `<div class="steward"><p>${status}</p><p>Only members of <code>${esc(me.group)}</code> can approve or edit definitions.</p></div>`;
+  if (editing === key) return `<div class="steward">
+      <label for="editText" class="sr">New definition</label>
+      <textarea id="editText" maxlength="1000">${esc(r.business_definition || "")}</textarea>
+      <div class="acts"><button class="btn primary" data-decide="edit" data-key="${esc(key)}">Save definition</button>
+        <button class="btn" data-editcancel="1">Cancel</button></div>${msg}</div>`;
+  const inGlossary = g && g.definition;
+  const canApprove = r.business_definition && !(inGlossary && g.definition === r.business_definition);
+  return `<div class="steward"><p>${status}</p><div class="acts">
+      ${canApprove && !inGlossary ? `<button class="btn" data-decide="approve" data-key="${esc(key)}" title="Keep this text as the official definition">Approve</button>` : ""}
+      ${r.proposed_definition ? `<button class="btn" data-decide="edit" data-key="${esc(key)}" data-text="${esc(r.proposed_definition)}" title="Replace the definition with the suggestion">Use suggestion</button>` : ""}
+      <button class="btn" data-edit="${esc(key)}">Edit</button>
+      ${hasReview && !(g && g.acknowledged_lineage_hash === r.lineage_hash) ? `<button class="btn" data-decide="ack" data-key="${esc(key)}" title="The upstream change doesn't affect this definition">Still correct</button>` : ""}
+      ${inGlossary ? `<button class="btn" data-decide="remove" data-key="${esc(key)}" title="Let the agent draft the definition again">Remove from glossary</button>` : ""}
+    </div>${msg}</div>`;
+}
+async function loadSteward() {
+  try { me = await getJson("api/me"); } catch (e) { me = { steward: false, group: "the stewards group", error: e.message }; }
+  try { gloss = Object.fromEntries((await getJson("api/glossary?refresh=true")).rows.map((g) => [g.column_key, g])); } catch (e) { gloss = {}; }
+  renderPending();
+  if (state.view === "worklist") renderWorklist(); else if (rows.length) renderRows();
+}
+function renderPending() {
+  const n = Object.keys(gloss).filter((k) => {
+    const r = rows.find((x) => `${x.target_table}.${x.target_column}` === k) || allRows[k];
+    return r && pendingOf(r, k);
+  }).length;
+  const el = $("pendingLine");
+  el.hidden = !n;
+  el.innerHTML = n ? `<b>${n}</b> steward decision${n > 1 ? "s are" : " is"} waiting for the agent. Select <b>Run agent</b> to apply ${n > 1 ? "them" : "it"} to the mapping and Unity Catalog.` : "";
+}
+async function decide(key, action, text) {
+  stewardMsg = { key, text: "Saving…" }; renderRows();
+  try {
+    const r = await fetch("api/glossary", { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ column: key, action, definition: text ?? null }) });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.detail || r.statusText);
+    editing = null;
+    stewardMsg = { key, text: { approve: "Approved.", edit: "Saved.", ack: "Confirmed.", remove: "Removed from the glossary." }[action] + " Run the agent to apply it." };
+    await loadSteward();
+  } catch (e) {
+    stewardMsg = { key, text: `Couldn't save: ${e.message}`, err: true }; renderRows();
+  }
+}
+
+/* ---------- issue status and worklist ---------- */
+const ikey = (i) => `${i.column_key}|${i.issue_type}|${i.fingerprint}`;
+const issuesOf = (key) => issues.filter((i) => i.column_key === key);
+const canTriage = (i) => !!me && (me.steward || (me.teams || []).includes(i.owner));
+const isNew = (i) => prevVisit != null && Date.parse(i.opened_at) > prevVisit;
+const myTeams = () => (me && me.teams) || [];
+const mine = (i) => allTeams || myTeams().includes(i.owner);
+const isActive = (i) => i.status === "open" || i.status === "in_progress";
+// "New since your last visit": the previous visit is kept per user in this browser only.
+function readVisit() {
+  if (prevVisit !== undefined || !me || !me.user) return;
+  const k = `sttm.lastVisit.${me.user}`;
+  try { const v = localStorage.getItem(k); prevVisit = v ? +v : null; localStorage.setItem(k, String(Date.now())); }
+  catch (e) { prevVisit = null; }
+}
+function triageHtml(i, compact) {
+  const k = ikey(i), msg = issueMsg && issueMsg.k === k ? `<p class="triage-who ${issueMsg.err ? "err" : ""}" role="status">${esc(issueMsg.text)}</p>` : "";
+  const who = i.updated_by ? `${STATUS[i.status]} since ${esc(fmtMs(Date.parse(i.updated_at)))}, set by ${esc(i.updated_by)}${i.assignee ? `. Assigned to ${esc(i.assignee)}` : ""}${i.comment ? `: “${esc(i.comment)}”` : "."}` : `Open since ${esc(fmtMs(Date.parse(i.opened_at)))}. Nobody has picked it up yet.`;
+  if (!canTriage(i)) {
+    return `<div class="triage-line"><span class="st ${i.status}">${STATUS[i.status]}</span><span>${who}</span></div>${compact ? "" : `<p class="triage-who">Only ${esc(i.owner)}${me && me.group ? ` or ${esc(me.group)}` : ""} can change it.</p>`}`;
+  }
+  const members = (owners.find((o) => o.owner === i.owner) || {}).members || [];
+  return `<div data-issue="${esc(k)}">
+    <div class="triage">
+      <label class="sr" for="st-${esc(k)}">Status</label>
+      <select id="st-${esc(k)}" data-f-status>${Object.entries(STATUS).map(([v, l]) => `<option value="${v}" ${v === i.status ? "selected" : ""}>${l}</option>`).join("")}</select>
+      <input data-f-assignee list="members-${esc(_slug(i.owner))}" placeholder="Assignee" aria-label="Assignee" value="${esc(i.assignee || "")}" maxlength="200">
+      <input data-f-comment placeholder="Comment (optional)" aria-label="Comment" value="${esc(i.comment || "")}" maxlength="1000">
+      <button class="btn" data-savestatus="${esc(k)}">Save</button>
+    </div>
+    <datalist id="members-${esc(_slug(i.owner))}">${members.map((m) => `<option value="${esc(m)}">`).join("")}</datalist>
+    <p class="triage-who">${who}</p>${msg}</div>`;
+}
+const _slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-");
+async function loadIssues(refresh = false) {
+  try {
+    const data = await getJson(`api/issues${refresh ? "?refresh=true" : ""}`);
+    issues = data.rows; owners = data.owners;
+  } catch (e) { issues = []; owners = []; }
+  readVisit();
+  renderWorkCount();
+  if (state.view === "worklist") renderWorklist(); else if (rows.length) renderRows();
+}
+function renderWorkCount() {
+  const n = issues.filter((i) => myTeams().includes(i.owner) && isActive(i)).length;
+  $("nWork").textContent = me ? n : "";
+}
+function renderWorklist() {
+  if (!me) { $("rows").innerHTML = `<div class="state">Checking who you are…</div>`; $("summary").textContent = ""; return; }
+  const teams = myTeams();
+  if (!teams.length && !(me.steward && allTeams)) {
+    $("summary").textContent = "";
+    $("rows").innerHTML = `<div class="state">You aren't in any owner team, so there is nothing on your worklist. Owner teams and their members are in the <code>owners</code> table next to the mapping.${me.steward ? `<br><button class="btn" data-allteams="1">Show every team's issues</button>` : ""}</div>`;
+    return;
+  }
+  const scope = issues.filter(mine);
+  const shown = scope.filter((i) => showClosed || isActive(i));
+  const nNew = scope.filter((i) => isActive(i) && isNew(i)).length, nClosed = scope.filter((i) => !isActive(i)).length;
+  const whose = allTeams ? "every owner team" : teams.map(esc).join(", ");
+  $("summary").innerHTML = `<b>${scope.filter(isActive).length}</b> open issue${scope.filter(isActive).length === 1 ? "" : "s"} on tables owned by ${whose}.`
+    + (prevVisit == null ? " This is your first visit from this browser: from now on, issues the agent finds after it are marked <b>New</b>."
+      : ` <b>${nNew}</b> new since your last visit (${esc(fmtMs(prevVisit))}).${nNew ? ` <button class="linkish" data-seen="1">Mark all as seen</button>` : ""}`)
+    + (nClosed ? ` <button class="linkish" data-showclosed="1">${showClosed ? "Hide" : "Show"} ${nClosed} accepted or won't fix</button>` : "")
+    + (me.steward ? ` <button class="linkish" data-allteams="1">${allTeams ? "Only my teams" : "Show every team"}</button>` : "");
+  if (!shown.length) {
+    $("rows").innerHTML = `<div class="state">Nothing to do: the agent reports no open issue on these tables${nClosed ? " that isn't accepted or marked won't fix" : ""}.</div>`;
+    return;
+  }
+  const groups = {};
+  for (const i of shown) (groups[i.target_table] ||= []).push(i);
+  $("rows").innerHTML = Object.entries(groups).map(([t, list]) => {
+    const [layer, name] = t.split(".");
+    list.sort((a, b) => (isNew(b) - isNew(a)) || (isActive(b) - isActive(a)) || a.column_key.localeCompare(b.column_key));
+    return `<section class="tbl" style="--metal:var(--${layer})">
+      <div class="tbl-head"><h3><span class="nm"><span class="layer">${esc(layer)}</span>.${esc(name)}</span></h3>
+        <div class="who">${list.length} issue${list.length > 1 ? "s" : ""}. Owned by ${esc(list[0].owner)}.</div></div>
+      <ul class="work">${list.map((i) => {
+        const text = i.issue_text.slice(i.issue_text.indexOf(":") + 1).trim();
+        return `<li class="${isNew(i) && isActive(i) ? "is-new" : ""}">
+          <div class="wi-top">${flagHtml(i.issue_type)}<button class="colref" data-goto="${esc(i.column_key)}" title="Open the column in the mapping">${esc(i.column_key)}</button>
+            ${isNew(i) && isActive(i) ? `<span class="new" title="Found by the agent after your last visit">New</span>` : ""}
+            ${i.status !== "open" ? `<span class="st ${i.status}">${STATUS[i.status]}</span>` : ""}</div>
+          <div class="wi-text">${esc(text)}</div>
+          ${triageHtml(i, false)}
+        </li>`;
+      }).join("")}</ul></section>`;
+  }).join("");
+}
+async function saveStatus(k, box) {
+  const i = issues.find((x) => ikey(x) === k);
+  if (!i || !box) return;
+  issueMsg = { k, text: "Saving…" };
+  const body = { column: i.column_key, issue_type: i.issue_type, fingerprint: i.fingerprint,
+    status: box.querySelector("[data-f-status]").value, assignee: box.querySelector("[data-f-assignee]").value,
+    comment: box.querySelector("[data-f-comment]").value };
+  try {
+    const r = await fetch("api/issues/status", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const out = await r.json();
+    if (!r.ok) throw new Error(out.detail || r.statusText);
+    issueMsg = { k, text: "Saved." };
+    await loadIssues(true);
+  } catch (e) {
+    issueMsg = { k, text: `Couldn't save: ${e.message}`, err: true };
+    const p = box.querySelector(".triage-who.err, p[role=status]");
+    if (p) p.remove();
+    box.insertAdjacentHTML("beforeend", `<p class="triage-who err" role="status">${esc(issueMsg.text)}</p>`);
+  }
+}
+
+/* ---------- agent runs ---------- */
+let agentTimer = null, agentWasActive = false;
+const fmtMs = (ms) => ms ? new Date(ms).toLocaleString(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) + " UTC" : "";
+async function loadAgent(summary = true) {
+  try { renderAgent(await getJson(`api/agent${summary ? "?summary=true" : ""}`)); }
+  catch (e) { $("agentLine").hidden = false; $("agentLine").className = "agent-line failed"; $("agentLine").textContent = `Couldn't read the agent's status: ${e.message}`; }
+}
+function renderAgent(a) {
+  const btn = $("runAgent"), line = $("agentLine");
+  if (!a.enabled) { btn.hidden = true; line.hidden = true; return; }
+  const run = a.run, active = !!(run && run.active);
+  btn.hidden = false; btn.disabled = active; btn.textContent = active ? "Agent running…" : "Run agent";
+  line.hidden = false; line.className = "agent-line";
+  if (active) {
+    line.innerHTML = `<span class="pulse" aria-hidden="true"></span>The agent is running (started ${esc(fmtMs(run.start_time))}). It checks the pipeline and Unity Catalog and updates only what changed. This usually takes one to two minutes.`;
+    agentWasActive = true;
+    clearTimeout(agentTimer); agentTimer = setTimeout(() => loadAgent(false), 5000);
+    return;
+  }
+  if (agentWasActive) {   // a run just ended: show its result and reload the mapping
+    agentWasActive = false;
+    line.textContent = "The agent finished. Reloading the mapping…";
+    loadMeta(true).then(() => loadRows(true)).then(loadSteward).then(() => loadIssues(true)).finally(() => loadAgent(true));
+    return;
+  }
+  if (run && run.result && run.result !== "SUCCESS") {
+    line.className = "agent-line failed";
+    line.innerHTML = `The last agent run ${run.result === "CANCELED" ? "was cancelled" : "failed"} (${esc(fmtMs(run.end_time || run.start_time))}).`
+      + (run.url ? ` <a href="${esc(run.url)}" target="_blank" rel="noopener">Open the run in Databricks</a> to see why.` : "");
+    return;
+  }
+  const s = a.summary;
+  if (!s) { line.textContent = "The agent hasn't run yet."; return; }
+  const changed = +s.rows_inserted + +s.rows_updated + +s.rows_deactivated;
+  line.innerHTML = `Last agent run ${esc(fmtMs(Date.parse(s.started_at)))}${s.requested_by ? `, started by ${esc(s.requested_by)}` : ""}: `
+    + (changed ? `${changed} column${changed > 1 ? "s" : ""} changed (${+s.rows_inserted} new, ${+s.rows_updated} updated, ${+s.rows_deactivated} removed)` : "nothing had changed")
+    + `. ${+s.open_issues} column${+s.open_issues === 1 ? "" : "s"} need${+s.open_issues === 1 ? "s" : ""} review`
+    + (+s.issues_new ? `, ${+s.issues_new} new issue${+s.issues_new > 1 ? "s" : ""} (owners get an email).` : ".")
+    + (run && run.url ? ` <a href="${esc(run.url)}" target="_blank" rel="noopener">Open the run</a>` : "");
+}
+async function startAgent() {
+  const btn = $("runAgent");
+  btn.disabled = true; btn.textContent = "Starting…";
+  try {
+    const r = await fetch("api/agent/run", { method: "POST" });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.detail || r.statusText);
+    agentWasActive = true;
+    renderAgent({ enabled: true, run: { ...body.run, active: true } });
+  } catch (e) {
+    btn.disabled = false; btn.textContent = "Run agent";
+    $("agentLine").hidden = false; $("agentLine").className = "agent-line failed";
+    $("agentLine").textContent = `Couldn't start the agent: ${e.message}`;
+  }
+}
+
+/* ---------- loading and events ---------- */
+async function loadRows(refresh = false) {
+  const my = ++seq;
+  syncUrl();
+  renderChips();
+  if (meta) renderMap();
+  if (state.view === "worklist") { renderWorklist(); return; }
+  $("rows").setAttribute("aria-busy", "true");
+  try {
+    const data = await getJson(`api/sttm?${params(refresh ? { refresh: "true" } : {})}`);
+    if (my !== seq) return;
+    rows = data.rows;
+    if (state.view === "worklist") return;
+    for (const r of rows) allRows[`${r.target_table}.${r.target_column}`] = r;
+    renderRows();
+    renderPending();
+    $("rows").setAttribute("aria-busy", "false");
+  } catch (e) {
+    if (my !== seq) return;
+    $("rows").setAttribute("aria-busy", "false");
+    $("summary").textContent = "";
+    $("rows").innerHTML = `<div class="state err">Couldn't read the mapping: ${esc(e.message)}<br>Check that the SQL warehouse is running and that you can read the table, then select Refresh.</div>`;
+  }
+}
+function toggle(key, value, on) {
+  const set = state.filters[key] || new Set();
+  if (on) set.add(value); else set.delete(value);
+  if (set.size) state.filters[key] = set; else delete state.filters[key];
+}
+function clearAll() {
+  state.filters = {}; state.q = ""; state.depends_on = ""; state.open = null;
+  $("q").value = ""; $("dep").value = "";
+}
+function update() { renderMenus(); loadRows(); }
+
+document.addEventListener("change", (e) => {
+  const f = e.target.dataset.f;
+  if (!f) return;
+  toggle(f, e.target.value, e.target.checked);
+  update();
+});
+document.addEventListener("click", (e) => {
+  for (const d of document.querySelectorAll("details.dd[open]")) if (!d.contains(e.target)) d.open = false;
+  const t = e.target.closest("button");
+  if (!t) return;
+  if (t.dataset.node) {
+    const n = t.dataset.node;
+    if (t.dataset.landing) { state.depends_on = state.depends_on === n ? "" : n; $("dep").value = state.depends_on; }
+    else { toggle("table", n, !(state.filters.table || new Set()).has(n)); delete fold[n]; }
+    state.open = null; update();
+  } else if (t.dataset.chip) {
+    const k = t.dataset.chip;
+    if (k === "*") clearAll();
+    else if (k === "q") { state.q = ""; $("q").value = ""; }
+    else if (k === "depends_on") { state.depends_on = ""; $("dep").value = ""; }
+    else toggle(k, t.dataset.v, false);
+    update();
+  } else if (t.dataset.savestatus) {
+    saveStatus(t.dataset.savestatus, t.closest("[data-issue]"));
+  } else if (t.dataset.seen) {
+    prevVisit = Date.now(); renderWorklist();
+  } else if (t.dataset.showclosed) {
+    showClosed = !showClosed; renderWorklist();
+  } else if (t.dataset.allteams) {
+    allTeams = !allTeams; renderWorklist();
+  } else if (t.dataset.goto) {
+    clearAll(); state.view = "ledger"; state.filters.table = new Set([tableOf(t.dataset.goto)]); state.open = t.dataset.goto;
+    delete fold[tableOf(t.dataset.goto)]; update();
+  } else if (t.dataset.impact) {
+    clearAll(); state.depends_on = t.dataset.impact; $("dep").value = state.depends_on; update();
+  } else if (t.dataset.decide) {
+    const text = t.dataset.decide === "edit" ? (t.dataset.text ?? $("editText")?.value) : null;
+    decide(t.dataset.key, t.dataset.decide, text);
+  } else if (t.dataset.edit) {
+    editing = t.dataset.edit; stewardMsg = null; renderRows(); $("editText")?.focus();
+  } else if (t.dataset.editcancel) {
+    editing = null; renderRows();
+  } else if (t.dataset.copy) {
+    navigator.clipboard?.writeText(t.dataset.copy);
+    const was = t.textContent; t.textContent = "Copied"; setTimeout(() => (t.textContent = was), 1500);
+  } else if (t.dataset.fold) {
+    fold[t.dataset.fold] = !isExpanded(t.dataset.fold);
+    renderRows();
+    document.querySelector(`button[data-fold="${cssEsc(t.dataset.fold)}"]`)?.focus();
+  } else if (t.dataset.foldall) {
+    for (const r of rows) fold[r.target_table] = t.dataset.foldall === "expand";
+    renderRows();
+  } else if (t.dataset.row) {
+    state.open = state.open === t.dataset.row ? null : t.dataset.row;
+    syncUrl(); renderRows();
+    document.querySelector(`button[data-row="${cssEsc(t.dataset.row)}"]`)?.focus();
+  } else if (t.id === "allBtn" || t.id === "reviewBtn") {
+    state.view = "ledger";
+    toggle("issue", "OPEN", t.id === "reviewBtn");
+    update();
+  } else if (t.id === "workBtn") {
+    state.view = "worklist"; state.open = null;
+    update();
+  }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  for (const d of document.querySelectorAll("details.dd[open]")) { d.open = false; d.querySelector("summary").focus(); }
+});
+$("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { state.q = $("q").value.trim(); loadRows(); }, 300); });
+for (const ev of ["change", "search"]) $("dep").addEventListener(ev, () => { state.depends_on = $("dep").value.trim(); loadRows(); });
+$("refresh").addEventListener("click", async () => { await loadMeta(true); await loadRows(true); await loadSteward(); loadIssues(true); });
+$("runAgent").addEventListener("click", startAgent);
+$("csv").addEventListener("click", () => {
+  if (!rows.length) return;
+  const cols = Object.keys(rows[0]);
+  const cell = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const csv = [cols.join(","), ...rows.map((r) => cols.map((c) => cell(r[c])).join(","))].join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = "sttm_filtered.csv";
+  a.click();
+});
+
+readUrl();
+loadAgent();
+loadSteward().then(() => loadIssues());
+loadMeta().then(() => loadRows()).catch((e) => {
+  $("source").textContent = "";
+  $("rows").innerHTML = `<div class="state err">Couldn't read the mapping: ${esc(e.message)}<br>Check that the SQL warehouse is running and that you can read the table, then reload the page.</div>`;
+});
+</script>
+</body>
+</html>

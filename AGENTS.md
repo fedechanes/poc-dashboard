@@ -23,6 +23,12 @@ Diagrams of both flows: `docs/embed-flows.html`.
 `README.md`, its own `.env` (`sttm-agent/.env`), its own state file (`sttm_state.json`, gitignored), and its own
 schemas (`<catalog>.sttm_*`). The same rules apply: no workspace-specific values in code, and re-runs must be
 safe. It shares only `pyproject.toml` with the dashboard POC. Run it with `uv run python sttm-agent/run.py <command>`.
+Its viewer app (`sttm-agent/app/`, run with `uv run python sttm-agent/app/app.py`, port 8001) reads `sttm_export`,
+`agent_runs`, `glossary`, `owners`, `issues` and `issue_status` as its service principal. Writes to `glossary`
+(steward decisions) and `issue_status` (owner statuses) run as the signed-in user (forwarded user token); keep it that
+way so Unity Catalog, not the app, decides who may write. Owner emails live only in the `owners` table (looked up with
+the SDK at run time): never put them in committed files. The per-team SQL alerts are created by `run.py app-deploy`;
+it must not change workspace-wide settings such as notification destinations.
 
 ## Layout
 

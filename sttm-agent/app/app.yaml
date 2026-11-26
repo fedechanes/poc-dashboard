@@ -1,0 +1,13 @@
+# Databricks App definition. Deploy the sttm-agent/app folder; see sttm-agent/README.md ("Viewer app").
+command: ["python", "app.py"]
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse
+  - name: STTM_JOB_ID
+    valueFrom: agent-job
+  - name: STTM_CATALOG
+    value: workspace
+  - name: STTM_PREFIX
+    value: sttm
+  - name: STTM_STEWARDS_GROUP
+    value: sttm-stewards

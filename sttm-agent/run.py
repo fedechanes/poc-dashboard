@@ -5,16 +5,17 @@
   uv run python sttm-agent/run.py pipeline  run the pipeline once
   uv run python sttm-agent/run.py demo      incremental demo: batch 2 + a pipeline SQL change, then re-run
   uv run python sttm-agent/run.py export    re-export CSV/Markdown from the STTM table
-  uv run python sttm-agent/run.py destroy   delete the pipeline and drop the sttm_* schemas
+  uv run python sttm-agent/run.py app-deploy  deploy the agent as a job and the viewer app (app/) as a Databricks App
+  uv run python sttm-agent/run.py destroy   delete the app, the job and the pipeline, drop the sttm_* schemas
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
+import os
 
-from sttm import agent, medallion
+from sttm import agent, medallion, viewer_app
 from sttm.config import (CATALOG, META, PIPELINE_DIR, SCHEMAS, STATE_FILE, client, fq, load_state, pick_warehouse,
                          run_sql, save_state)
 
@@ -50,7 +51,7 @@ def print_flows(res: dict) -> None:
 
 def print_summary(s: dict) -> None:
     keys = ["tables_processed", "rows_inserted", "rows_updated", "rows_deactivated", "rows_unchanged", "llm_calls",
-            "comments_written", "tags_written", "open_issues", "uc_edges_new", "sttm_version", "seconds"]
+            "comments_written", "tags_written", "open_issues", "issues_new", "issues_closed", "uc_edges_new", "sttm_version", "seconds"]
     print("   " + ", ".join(f"{k}={s.get(k)}" for k in keys if k in s))
 
 
@@ -154,8 +155,16 @@ def cmd_demo(w, a) -> None:
     print_summary(agent.build(w, agent.Log()))
 
 
+def cmd_app_deploy(w, a) -> None:
+    state = load_state(w)
+    app, job_id, alerts = viewer_app.deploy(w, state)
+    save_state(w, app_name=app.name, job_id=job_id, alerts=alerts)
+    print(f"   {app.name}: {app.url}")
+
+
 def cmd_destroy(w, a) -> None:
     state = load_state(w, required=False)
+    viewer_app.delete(w, state)
     if state.get("pipeline_id"):
         w.pipelines.delete(state["pipeline_id"])
         print(f"   deleted pipeline {state['pipeline_id']}")
@@ -171,13 +180,25 @@ def cmd_destroy(w, a) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["setup", "agent", "pipeline", "demo", "export", "destroy"])
+    p.add_argument("command", choices=["setup", "agent", "pipeline", "demo", "export", "app-deploy", "destroy"])
     p.add_argument("--full", action="store_true", help="agent: reprocess every table; pipeline: full refresh")
     p.add_argument("--dry-run", action="store_true", help="agent: show what would change, write nothing")
+    # used by the agent job, which has no sttm_state.json and no local output folder
+    p.add_argument("--pipeline-id", help="pipeline id (instead of sttm_state.json)")
+    p.add_argument("--warehouse-id", help="SQL warehouse id (instead of sttm_state.json)")
+    p.add_argument("--no-files", action="store_true", help="agent: skip output/sttm.csv and sttm.md")
+    p.add_argument("--requested-by", help="agent: who asked for this run (recorded in agent_runs.details)")
     a = p.parse_args()
+    for flag, env in ((a.pipeline_id, "STTM_PIPELINE_ID"), (a.warehouse_id, "DATABRICKS_WAREHOUSE_ID")):
+        if flag:
+            os.environ[env] = flag
+    if a.requested_by:
+        os.environ["STTM_REQUESTED_BY"] = a.requested_by
+    if a.no_files:
+        os.environ["STTM_EXPORT_FILES"] = "0"
     w = client()
-    globals()[f"cmd_{a.command}"](w, a)
+    globals()[f"cmd_{a.command.replace('-', '_')}"](w, a)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()   # no sys.exit(): a job task reports any SystemExit, even a clean one, as failed

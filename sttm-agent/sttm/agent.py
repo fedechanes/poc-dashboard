@@ -5,18 +5,20 @@ One run:
   2. read UC metadata (columns, types, comments, tags) and pull new UC column lineage since the watermark
   3. work out which target tables changed (hashes) and only process those + their downstream tables
   4. per target column: sources, expression, type, owner, layer, lineage path, definition, issues
-     - definition priority: glossary > comment declared in pipeline SQL > human UC comment >
+     - definition priority: glossary (steward-approved, glossary table) > comment declared in pipeline SQL > human UC comment >
        previous draft (if nothing upstream changed) > new LLM draft (rule-based fallback without LLM)
      - human/declared definitions are checked against the transformation (LLM judge) when either changes
   5. MERGE into the STTM Delta table (only rows whose content hash changed are touched; CDF records them)
   6. write comments/tags back to UC, only where they differ from what is there
-  7. save fingerprints + watermark, log the run, export CSV/Markdown
+  7. save fingerprints + watermark, export the flat sttm_export table + CSV/Markdown
+  8. track issues (sttm_meta.issues): which are new, reopened or gone in this run; log the run
 """
 
 from __future__ import annotations
 
 import csv
 import json
+import os
 import re
 import time
 import tomllib
@@ -27,7 +29,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 from . import sqlparse
-from .config import (CATALOG, GLOSSARY_FILE, LANDING_PATH, LAYERS, LLM_ENDPOINT, META, OUTPUT_DIR, PIPELINE_CONF,
+from .config import (CATALOG, DEFAULT_OWNER, GLOSSARY_FILE, LANDING_PATH, LAYERS, LLM_ENDPOINT, META, OUTPUT_DIR, PIPELINE_CONF,
                      SCHEMAS, layer_of_schema, load_state, run_sql, sql_str)
 from .sqlparse import FILE_SOURCE, sha
 
@@ -38,7 +40,8 @@ WRITABLE_SOURCES = ("glossary", "llm", "rule", "inherited")      # definitions t
 STTM_COLUMNS = {   # name -> SQL type; order = table order
     "target_table": "STRING", "target_column": "STRING", "layer": "STRING", "data_type": "STRING",
     "owner": "STRING", "source_columns": "ARRAY<STRING>", "transformation": "STRING", "mapping_kind": "STRING",
-    "table_rule": "STRING", "business_definition": "STRING", "definition_source": "STRING",
+    "table_rule": "STRING", "rule_columns": "ARRAY<STRING>", "business_definition": "STRING",
+    "definition_source": "STRING",
     "proposed_definition": "STRING", "lineage_path": "STRING", "bronze_sources": "ARRAY<STRING>",
     "lineage_origin": "STRING", "issues": "ARRAY<STRING>", "rule_hash": "STRING", "lineage_hash": "STRING",
     "row_hash": "STRING",
@@ -83,6 +86,10 @@ def ensure_meta(w: WorkspaceClient) -> None:
   is_active BOOLEAN, first_seen_run STRING, last_changed_run STRING, updated_at TIMESTAMP)
 COMMENT 'Source-to-target mapping, one row per target column (maintained by the STTM agent)'
 TBLPROPERTIES (delta.enableChangeDataFeed = true)""")
+    have = {r["col_name"] for r in run_sql(w, f"DESCRIBE TABLE {META}.sttm")}
+    added = [f"{k} {v}" for k, v in STTM_COLUMNS.items() if k not in have]
+    if added:   # columns added in a later version of the agent
+        run_sql(w, f"ALTER TABLE {META}.sttm ADD COLUMNS ({', '.join(added)})")
     run_sql(w, f"""CREATE TABLE IF NOT EXISTS {META}.table_fingerprints (
   target_table STRING, sql_hash STRING, schema_hash STRING, glossary_hash STRING, uc_edges_hash STRING,
   run_id STRING, updated_at TIMESTAMP)
@@ -90,6 +97,40 @@ COMMENT 'Per target table: hashes of what the STTM was last built from (change d
     run_sql(w, f"""CREATE TABLE IF NOT EXISTS {META}.uc_lineage (
   level STRING, source STRING, target STRING, entity_type STRING, first_seen TIMESTAMP, last_seen TIMESTAMP)
 COMMENT 'Distinct UC lineage edges (column and table level) for the medallion, pulled incrementally from system.access'""")
+    run_sql(w, f"""CREATE TABLE IF NOT EXISTS {META}.glossary (
+  column_key STRING COMMENT '<layer>.<table>.<column>',
+  definition STRING COMMENT 'Approved business definition; NULL = only an acknowledgment of the current definition',
+  acknowledged_lineage_hash STRING COMMENT 'Upstream fingerprint the steward confirmed; a REVIEW issue stays closed while it matches',
+  note STRING, updated_by STRING, updated_at TIMESTAMP)
+COMMENT 'Steward-approved definitions and acknowledgments (written from the STTM viewer app, read by the agent)'
+TBLPROPERTIES (delta.enableChangeDataFeed = true)""")
+    run_sql(w, f"""CREATE TABLE IF NOT EXISTS {META}.owners (
+  owner STRING COMMENT 'Owner team, as named in glossary.toml [owners]',
+  members ARRAY<STRING> COMMENT 'Databricks user names (emails) of the people in the team',
+  notify_email STRING COMMENT 'Where the SQL alert of the team sends new-issue notifications',
+  note STRING, updated_by STRING, updated_at TIMESTAMP)
+COMMENT 'Owner teams -> people. New teams are added by the agent; edit members and notify_email here'
+TBLPROPERTIES (delta.enableChangeDataFeed = true)""")
+    run_sql(w, f"""CREATE TABLE IF NOT EXISTS {META}.issues (
+  column_key STRING COMMENT '<layer>.<table>.<column>',
+  target_table STRING COMMENT '<layer>.<table>',
+  owner STRING COMMENT 'Owner team of the table',
+  issue_type STRING COMMENT 'CONFLICT, REVIEW, GAP, FIX IN PIPELINE SQL, LINEAGE (INFO is not tracked)',
+  fingerprint STRING COMMENT 'Identity of the issue across runs; a new fingerprint means a new issue',
+  issue_text STRING COMMENT 'Latest text of the issue',
+  is_open BOOLEAN COMMENT 'The latest agent run still reports it',
+  first_seen_run STRING, first_seen_at TIMESTAMP,
+  opened_run STRING COMMENT 'Run that reported it as new (or again, after it had gone)',
+  opened_at TIMESTAMP,
+  closed_run STRING COMMENT 'Run that stopped reporting it', closed_at TIMESTAMP)
+COMMENT 'Every issue the STTM agent has reported, with the run that opened and closed it (maintained by the agent)'
+TBLPROPERTIES (delta.enableChangeDataFeed = true)""")
+    run_sql(w, f"""CREATE TABLE IF NOT EXISTS {META}.issue_status (
+  column_key STRING, issue_type STRING, fingerprint STRING COMMENT 'Same key as sttm_meta.issues',
+  status STRING COMMENT 'open, in_progress, accepted or wont_fix',
+  assignee STRING, comment STRING, updated_by STRING, updated_at TIMESTAMP)
+COMMENT 'Owner decisions on agent issues (written from the STTM viewer app as the signed-in user)'
+TBLPROPERTIES (delta.enableChangeDataFeed = true)""")
     run_sql(w, f"""CREATE TABLE IF NOT EXISTS {META}.agent_state (k STRING, v STRING)
 COMMENT 'STTM agent watermarks'""")
     run_sql(w, f"""CREATE TABLE IF NOT EXISTS {META}.agent_runs (
@@ -98,6 +139,8 @@ COMMENT 'STTM agent watermarks'""")
   comments_written INT, tags_written INT, open_issues INT, uc_edges_new BIGINT, lineage_watermark STRING,
   sttm_version BIGINT, details STRING)
 COMMENT 'One row per STTM agent run'""")
+    seed_glossary(w)
+    seed_owners(w)
 
 
 def get_state(w: WorkspaceClient, k: str) -> str | None:
@@ -231,9 +274,47 @@ def read_uc_edges(w: WorkspaceClient) -> tuple[dict[str, set[str]], dict[str, se
     return cols, tabs
 
 
-def load_glossary() -> tuple[dict, dict]:
-    g = tomllib.loads(GLOSSARY_FILE.read_text()) if GLOSSARY_FILE.exists() else {}
-    return g.get("owners", {}), g.get("definitions", {})
+def _glossary_file() -> dict:
+    return tomllib.loads(GLOSSARY_FILE.read_text()) if GLOSSARY_FILE.exists() else {}
+
+
+def seed_glossary(w: WorkspaceClient) -> None:
+    """First run only: copy the definitions of glossary.toml into the glossary table. After that the table is the
+    source of truth (stewards edit it from the viewer app); later edits to the file's definitions are ignored."""
+    if get_state(w, "glossary_seeded"):
+        return
+    defs = _glossary_file().get("definitions", {})
+    if defs:
+        run_sql(w, f"""MERGE INTO {META}.glossary t
+            USING (SELECT key AS column_key, value AS definition FROM (SELECT explode(from_json(:p, 'map<string,string>')))) s
+            ON t.column_key = s.column_key
+            WHEN NOT MATCHED THEN INSERT (column_key, definition, note, updated_by, updated_at)
+                 VALUES (s.column_key, s.definition, 'imported from glossary.toml', 'glossary.toml', current_timestamp())""",
+                {"p": json.dumps(defs)})
+    set_state(w, "glossary_seeded", "1")
+
+
+def seed_owners(w: WorkspaceClient) -> None:
+    """Add every owner team named in glossary.toml that the owners table doesn't have yet. For now each new team maps
+    to one person (STTM_DEFAULT_OWNER, else whoever runs this); existing rows are never changed, so a team that was
+    split into real members keeps them."""
+    teams = sorted(set(_glossary_file().get("owners", {}).values()))
+    if not teams:
+        return
+    person = DEFAULT_OWNER or w.current_user.me().user_name
+    run_sql(w, f"""MERGE INTO {META}.owners t
+        USING (SELECT explode(from_json(:teams, 'array<string>')) AS owner) s ON t.owner = s.owner
+        WHEN NOT MATCHED THEN INSERT (owner, members, notify_email, note, updated_by, updated_at)
+             VALUES (s.owner, array(:person), :person, 'default: every team maps to one person until it is split',
+                     current_user(), current_timestamp())""", {"teams": json.dumps(teams), "person": person})
+
+
+def load_glossary(w: WorkspaceClient) -> tuple[dict, dict, dict]:
+    """(owners from glossary.toml, approved definitions, acknowledged lineage hashes) per <layer>.<table>.<column>."""
+    rows = run_sql(w, f"SELECT column_key, definition, acknowledged_lineage_hash FROM {META}.glossary")
+    return (_glossary_file().get("owners", {}),
+            {r["column_key"]: r["definition"] for r in rows if r["definition"]},
+            {r["column_key"]: r["acknowledged_lineage_hash"] for r in rows if r["acknowledged_lineage_hash"]})
 
 
 # ---------------------------------------------------------------------------------------------------- LLM
@@ -345,10 +426,10 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
         log(f"   ! defined in SQL but not in UC yet (run the pipeline): {', '.join(map(short, missing))}")
     uc_new, new_wm = pull_uc_lineage(w, log) if not dry_run else (0, None)
     uc_edges, uc_tables = read_uc_edges(w)
-    owners, glossary = load_glossary()
+    owners, glossary, acks = load_glossary(w)
     prev = {}
     for r in run_sql(w, f"SELECT * FROM {META}.sttm WHERE is_active"):
-        for k in ("source_columns", "issues", "bronze_sources"):
+        for k in ("source_columns", "issues", "bronze_sources", "rule_columns"):
             r[k] = json.loads(r[k]) if r[k] else []
         prev[(r["target_table"], r["target_column"])] = r
     fps = {r["target_table"]: r for r in run_sql(w, f"SELECT * FROM {META}.table_fingerprints")}
@@ -405,6 +486,7 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
         r["bronze_sources"] = sorted({short(c) for level in levels for c in level
                                       if c.startswith(f"{CATALOG}.{SCHEMAS['bronze']}.")})
         r["source_columns"] = [short(s) for s in r["_sources"]]
+        r["rule_columns"] = sorted(short(c) for c in r["_ctx"])
         u, s = r["_uc_src"], r["_sql_src"]
         src_tables = {table_of(x) if not x.startswith(FILE_SOURCE) else x for x in s}
         confirmed = bool(src_tables) and src_tables <= uc_tables.get(r["target_table"], set())
@@ -414,9 +496,9 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
 
     # which tables need work
     gloss_by_table: dict[str, str] = {}
-    for k, v in glossary.items():
-        gloss_by_table.setdefault(k.rsplit(".", 1)[0], "")
-        gloss_by_table[k.rsplit(".", 1)[0]] += f"{k}={v}|"
+    for k, v in sorted(glossary.items()) + sorted((f"ack:{k}", h) for k, h in acks.items()):
+        t = k.removeprefix("ack:").rsplit(".", 1)[0]
+        gloss_by_table[t] = gloss_by_table.get(t, "") + f"{k}={v}|"
     new_fp, reasons = {}, {}
     for name, ds in datasets.items():
         if name not in columns:
@@ -484,7 +566,8 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
         else:
             task = None
             if p:   # nothing changed for this column: keep the earlier verdict
-                r["issues"] = [i for i in (p["issues"] or []) if i.startswith(("CONFLICT", "REVIEW"))]
+                r["issues"] = [i for i in (p["issues"] or []) if i.startswith("CONFLICT")
+                               or (i.startswith("REVIEW") and acks.get(key) != r["lineage_hash"])]
                 r["proposed_definition"] = p["proposed_definition"]
         if task:
             by_table.setdefault(r["target_table"], []).append({
@@ -546,7 +629,7 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
 
     for tgt, r in work.items():   # deterministic gap/lineage checks
         if r["_upstream_changed"] and r["definition_source"] in ("glossary", "pipeline_sql", "uc_comment") \
-                and not any(i.startswith("REVIEW") for i in r["issues"]):
+                and acks.get(short(tgt)) != r["lineage_hash"] and not any(i.startswith("REVIEW") for i in r["issues"]):
             r["issues"].append(f"REVIEW: upstream rule changed ({', '.join(r['_upstream_changed'])}); "
                                f"confirm this {r['definition_source']} definition still holds")
         if r["mapping_kind"] == "constant":
@@ -606,6 +689,8 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
                 {"p": json.dumps([new_fp[n] for n in changed]), "run": run_id})
     if new_wm:
         set_state(w, "lineage_watermark", new_wm)
+    export(w, log)
+    summary.update(sync_issues(w, run_id, log))
     open_issues = run_sql(w, f"""SELECT count(*) AS n FROM {META}.sttm
                                  WHERE is_active AND exists(issues, i -> i NOT LIKE 'INFO%')""")[0]["n"]
     summary.update(open_issues=int(open_issues), seconds=int(time.time() - t0),
@@ -619,8 +704,10 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
              "deact": str(summary["rows_deactivated"]), "unch": str(summary["rows_unchanged"]),
              "llm": str(drafter.calls), "com": str(comments), "tags": str(tag_writes), "issues": str(open_issues),
              "uc": str(uc_new), "wm": summary["lineage_watermark"], "ver": str(v_after),
-             "details": json.dumps({"reasons": {short(k): v for k, v in reasons.items()}})})
-    export(w, log)
+             "details": json.dumps({"reasons": {short(k): v for k, v in reasons.items()},
+                                    "requested_by": os.getenv("STTM_REQUESTED_BY") or None,
+                                    "issues_new": summary["issues_new"], "issues_closed": summary["issues_closed"],
+                                    "new_issues": summary["new_issue_keys"]})})
     return summary
 
 
@@ -734,25 +821,194 @@ def write_back(w: WorkspaceClient, work: dict[str, dict], log: Log) -> tuple[int
 
 # ---------------------------------------------------------------------------------------------------- export
 
-EXPORT_COLS = ["target_table", "target_column", "layer", "data_type", "owner", "source_columns", "transformation",
-               "table_rule", "business_definition", "definition_source", "lineage_path", "lineage_origin", "issues",
-               "proposed_definition", "last_changed_run"]
+# Flat copy of the active STTM, one row per target column, same columns as the CSV (lists joined with "; ").
+# The viewer app (app/) reads only this table.
+EXPORT_SCHEMA = {   # name -> (SQL type, column comment)
+    "target_table": ("STRING", "Target table, <layer>.<table>"),
+    "target_column": ("STRING", "Target column"),
+    "layer": ("STRING", "bronze, silver or gold"),
+    "data_type": ("STRING", "UC data type of the target column"),
+    "owner": ("STRING", "Data owner / steward (glossary.toml [owners])"),
+    "source_columns": ("STRING", "Direct source columns, '; '-separated"),
+    "transformation": ("STRING", "Column expression, with intermediate CTE steps"),
+    "mapping_kind": ("STRING", "direct, derived, constant or technical"),
+    "table_rule": ("STRING", "Joins, filters, dedup, grain and CDC rules that apply to the whole table"),
+    "rule_columns": ("STRING", "Columns the table rule reads (join keys, filters, dedup order), '; '-separated"),
+    "business_definition": ("STRING", "Business definition of the column"),
+    "definition_source": ("STRING", "glossary (steward-approved), pipeline_sql, uc_comment, inherited, llm or rule"),
+    "proposed_definition": ("STRING", "Corrected definition proposed when the current one conflicts with the SQL"),
+    "lineage_path": ("STRING", "Lineage back to bronze and the landed files: target <- sources <- ..."),
+    "bronze_sources": ("STRING", "Bronze columns the target ultimately reads, '; '-separated"),
+    "upstream_columns": ("STRING", "Every column this one depends on at any depth, through its sources and its "
+                                   "table rule (silver, bronze, landing), '; '-separated"),
+    "lineage_hash": ("STRING", "Fingerprint of the column's rule and everything upstream (a steward's "
+                               "'still correct' is stored against it)"),
+    "lineage_origin": ("STRING", "Where the lineage comes from: sql, sql+uc column, sql, uc table-confirmed, none"),
+    "issues": ("STRING", "Issues found by the agent, ' | '-separated"),
+    "issue_types": ("STRING", "Issue categories (GAP, CONFLICT, REVIEW, ...), '; '-separated"),
+    "has_open_issue": ("BOOLEAN", "True when there is an issue other than INFO"),
+    "uc_table": ("STRING", "Fully qualified UC table name"),
+    "first_seen_run": ("STRING", "Agent run that first created the row"),
+    "last_changed_run": ("STRING", "Agent run that last changed the row"),
+    "updated_at": ("TIMESTAMP", "When the row last changed in the STTM table"),
+}
+EXPORT_COLS = list(EXPORT_SCHEMA)
+
+
+def _issue_type(issue: str) -> str:
+    return issue.split(":", 1)[0].strip()
+
+
+def _export_rows(rows: list[dict]) -> list[dict]:
+    """sttm rows (arrays as JSON) -> flat export rows, plus upstream_columns at any depth."""
+    sources = {short(r["target_table"]) + "." + r["target_column"]:
+               json.loads(r["source_columns"] or "[]") + json.loads(r["rule_columns"] or "[]") for r in rows}
+
+    def upstream(col: str, seen: set[str]) -> set[str]:
+        for s in sources.get(col, []):
+            if s not in seen:
+                seen.add(s)
+                upstream(s, seen)
+        return seen
+
+    out = []
+    for r in rows:
+        tgt = short(r["target_table"])
+        issues = json.loads(r["issues"] or "[]")
+        types = list(dict.fromkeys(_issue_type(i) for i in issues))
+        flat = {k: r.get(k) for k in EXPORT_COLS}
+        flat.update(target_table=tgt, uc_table=r["target_table"].replace("`", ""),
+                    source_columns="; ".join(json.loads(r["source_columns"] or "[]")),
+                    bronze_sources="; ".join(json.loads(r["bronze_sources"] or "[]")),
+                    rule_columns="; ".join(json.loads(r["rule_columns"] or "[]")),
+                    upstream_columns="; ".join(sorted(upstream(f"{tgt}.{r['target_column']}", set()),
+                                                      key=lambda c: (_layer_rank(c), c))),
+                    issues=" | ".join(issues), issue_types="; ".join(types),
+                    has_open_issue=any(t != "INFO" for t in types))
+        out.append(flat)
+    return out
+
+
+def _layer_rank(col: str) -> int:
+    for i, layer in enumerate(("gold", "silver", "bronze", "landing")):
+        if col.startswith(layer):
+            return i
+    return 9
+
+
+def write_export_table(w: WorkspaceClient, rows: list[dict], log: Log) -> None:
+    """Replace sttm_export atomically (INSERT OVERWRITE), only when its content would change."""
+    payload = json.dumps(rows, default=str)
+    content = sha(json.dumps(EXPORT_SCHEMA) + payload)
+    have = [c["column_name"] for c in run_sql(w, f"""SELECT column_name FROM `{CATALOG}`.information_schema.columns
+        WHERE table_schema = :s AND table_name = 'sttm_export' ORDER BY ordinal_position""", {"s": SCHEMAS["meta"]})]
+    if have == EXPORT_COLS and get_state(w, "export_content_hash") == content:
+        log(f"   {META.replace('`', '')}.sttm_export already up to date")
+        return
+    if have != EXPORT_COLS:
+        cols = ",\n  ".join(f"{k} {t} COMMENT {sql_str(c)}" for k, (t, c) in EXPORT_SCHEMA.items())
+        run_sql(w, f"""CREATE OR REPLACE TABLE {META}.sttm_export (
+  {cols})
+COMMENT 'Flat copy of the active STTM (same columns as output/sttm.csv); read by the STTM viewer app'""")
+    struct = ",".join(f"{k}:{t.lower()}" for k, (t, _) in EXPORT_SCHEMA.items())
+    run_sql(w, f"""INSERT OVERWRITE {META}.sttm_export
+                   SELECT * FROM (SELECT inline(from_json(:p, 'array<struct<{struct}>>')))""", {"p": payload})
+    set_state(w, "export_content_hash", content)
+    log(f"   wrote {len(rows)} rows -> {META.replace('`', '')}.sttm_export")
+
+
+# ---------------------------------------------------------------------------------------------------- issues
+
+TRACKED_ISSUES = ("CONFLICT", "REVIEW", "GAP", "FIX IN PIPELINE SQL", "LINEAGE")   # INFO is not an issue to work on
+ISSUE_STRUCT = "array<struct<column_key:string,target_table:string,owner:string,issue_type:string,fingerprint:string," \
+               "issue_text:string>>"
+
+
+def issue_fingerprint(issue: str, definition: str | None) -> str:
+    """Identity of an issue across runs, so an owner's status survives runs that report the same thing again.
+    CONFLICT / FIX IN PIPELINE SQL: the definition being judged (the LLM's reason may be worded differently each time;
+    a new definition is a new issue). Others are deterministic: their normalised text."""
+    t = _issue_type(issue)
+    if t in ("CONFLICT", "FIX IN PIPELINE SQL") and definition:
+        basis = " ".join(definition.split()).lower()
+    else:
+        basis = " ".join(issue.split(":", 1)[-1].split()).lower()
+    return sha(f"{t}|{basis}")
+
+
+def current_issues(rows: list[dict]) -> list[dict]:
+    """Open issues of the active STTM rows (issues as JSON arrays), one per column, type and fingerprint."""
+    out: dict[tuple, dict] = {}
+    for r in rows:
+        key = f"{short(r['target_table'])}.{r['target_column']}"
+        for i in json.loads(r["issues"] or "[]"):
+            t = _issue_type(i)
+            if t not in TRACKED_ISSUES:
+                continue
+            fp = issue_fingerprint(i, r["business_definition"])
+            out[(key, t, fp)] = {"column_key": key, "target_table": key.rsplit(".", 1)[0], "owner": r["owner"],
+                                 "issue_type": t, "fingerprint": fp, "issue_text": i}
+    return sorted(out.values(), key=lambda x: (x["column_key"], x["issue_type"], x["fingerprint"]))
+
+
+def sync_issues(w: WorkspaceClient, run_id: str, log: Log) -> dict:
+    """Record which issues this run reports for the first time (or again), and which are gone. The owners' SQL alerts
+    read `opened_run`; the viewer app joins owner decisions (issue_status) on the same key."""
+    rows = run_sql(w, f"SELECT target_table, target_column, owner, issues, business_definition FROM {META}.sttm "
+                      "WHERE is_active")
+    issues = current_issues(rows)
+    payload = json.dumps(issues)
+    content = sha(payload)
+    out = {"issues_new": 0, "issues_closed": 0, "new_issue_keys": []}
+    if get_state(w, "issues_content_hash") == content:
+        log("   issues: none new, none closed")
+        return out
+    run_sql(w, f"""
+        MERGE INTO {META}.issues t
+        USING (SELECT inline(from_json(:p, '{ISSUE_STRUCT}'))) s
+        ON t.column_key = s.column_key AND t.issue_type = s.issue_type AND t.fingerprint = s.fingerprint
+        WHEN MATCHED AND NOT t.is_open THEN UPDATE SET is_open = true, opened_run = :run,
+             opened_at = current_timestamp(), closed_run = NULL, closed_at = NULL, issue_text = s.issue_text,
+             owner = s.owner
+        WHEN MATCHED AND (t.issue_text <> s.issue_text OR t.owner IS DISTINCT FROM s.owner) THEN
+             UPDATE SET issue_text = s.issue_text, owner = s.owner
+        WHEN NOT MATCHED THEN INSERT (column_key, target_table, owner, issue_type, fingerprint, issue_text, is_open,
+                                      first_seen_run, first_seen_at, opened_run, opened_at)
+             VALUES (s.column_key, s.target_table, s.owner, s.issue_type, s.fingerprint, s.issue_text, true,
+                     :run, current_timestamp(), :run, current_timestamp())
+        WHEN NOT MATCHED BY SOURCE AND t.is_open THEN
+             UPDATE SET is_open = false, closed_run = :run, closed_at = current_timestamp()""",
+            {"p": payload, "run": run_id})
+    set_state(w, "issues_content_hash", content)
+    new = run_sql(w, f"SELECT column_key, issue_type FROM {META}.issues WHERE opened_run = :r ORDER BY 1, 2",
+                  {"r": run_id})
+    closed = run_sql(w, f"SELECT count(*) AS n FROM {META}.issues WHERE closed_run = :r", {"r": run_id})[0]["n"]
+    out.update(issues_new=len(new), issues_closed=int(closed),
+               new_issue_keys=[f"{r['column_key']} {r['issue_type']}" for r in new])
+    log(f"   issues: {len(new)} new, {closed} closed ({len(issues)} open)")
+    for k in out["new_issue_keys"]:
+        log(f"     new: {k}")
+    return out
 
 
 def export(w: WorkspaceClient, log: Log) -> None:
     rows = run_sql(w, f"""SELECT * FROM {META}.sttm WHERE is_active
                           ORDER BY CASE layer WHEN 'bronze' THEN 1 WHEN 'silver' THEN 2 ELSE 3 END,
                                    target_table, target_column""")
+    flat = _export_rows(rows)
+    write_export_table(w, flat, log)
+    if os.getenv("STTM_EXPORT_FILES", "1") == "0":   # the agent job only refreshes the table
+        return
     OUTPUT_DIR.mkdir(exist_ok=True)
+    with open(OUTPUT_DIR / "sttm.csv", "w", newline="") as f:
+        wr = csv.writer(f)
+        wr.writerow(EXPORT_COLS)
+        for r in flat:
+            wr.writerow([r[k] for k in EXPORT_COLS])
     for r in rows:
         r["target_table"] = short(r["target_table"])
         for k in ("source_columns", "issues", "bronze_sources"):
             r[k] = json.loads(r[k]) if r[k] else []
-    with open(OUTPUT_DIR / "sttm.csv", "w", newline="") as f:
-        wr = csv.writer(f)
-        wr.writerow(EXPORT_COLS)
-        for r in rows:
-            wr.writerow(["; ".join(r[k]) if isinstance(r[k], list) else r[k] for k in EXPORT_COLS])
 
     def esc(s) -> str:
         s = "; ".join(s) if isinstance(s, list) else (s or "")
