@@ -13,6 +13,8 @@ Real environment variables win over the file.
                          'none' = deterministic rule-based fallback, no LLM)
   STTM_DEFAULT_OWNER     user name (email) that every owner team in glossary.toml maps to when it is first added to
                          the owners table (default: the user running the agent or the deploy)
+  STTM_HISTORY_RETENTION_DAYS  days the change data feed of sttm, glossary, issues and issue_status stays readable
+                         for the viewer's History (default 30; sets delta.deletedFileRetentionDuration)
 
 Workspace-specific ids (pipeline id, warehouse id, host) live in sttm_state.json (gitignored).
 """
@@ -51,6 +53,7 @@ PREFIX = os.getenv("STTM_PREFIX", "sttm")
 PIPELINE_NAME = os.getenv("STTM_PIPELINE_NAME", "sttm-medallion")
 LLM_ENDPOINT = os.getenv("STTM_LLM_ENDPOINT", "databricks-qwen3-next-80b-a3b-instruct")
 DEFAULT_OWNER = os.getenv("STTM_DEFAULT_OWNER", "")
+HISTORY_RETENTION_DAYS = int(os.getenv("STTM_HISTORY_RETENTION_DAYS", "30"))
 
 LAYERS = ("bronze", "silver", "gold")
 SCHEMAS = {name: f"{PREFIX}_{name}" for name in ("landing", "bronze", "silver", "gold", "meta")}

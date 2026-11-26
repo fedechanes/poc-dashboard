@@ -210,6 +210,42 @@ ul.work > li.is-new { box-shadow: inset 3px 0 0 var(--verdigris); }
 .flags .st { font-weight: 500; }
 @media (max-width: 860px) { .triage { grid-template-columns: minmax(0, 1fr); } }
 
+/* ---------- history ---------- */
+.hist-tools { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 4px 0 0; font-size: 14px; color: var(--ink-2); }
+.hist-tools select { font-size: 14px; padding: 4px 8px; border: 1px solid var(--hair); border-radius: 6px; background: var(--surface); color: var(--ink); }
+.hist-note { margin: 10px 0 0; padding: 8px 12px; border-left: 3px solid var(--review); background: var(--review-wash); font-size: 13.5px; max-width: 90ch; }
+ol.tl { list-style: none; margin: 10px 0 30px; padding: 0; border-top: 1px solid var(--hair); }
+ol.tl > li { display: grid; grid-template-columns: 9.5em minmax(0, 1fr); gap: 4px 18px; padding: 12px 8px; border-bottom: 1px solid var(--hair); }
+ol.tl > li.quiet { color: var(--ink-2); padding-top: 7px; padding-bottom: 7px; }
+.tl .when { font-size: 13px; color: var(--ink-2); font-variant-numeric: tabular-nums; padding-top: 2px; }
+.tl .head { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+.tl .what { font-weight: 600; }
+.kind { display: inline-block; font-size: 11.5px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; padding: 1px 7px; border-radius: 4px; border: 1px solid var(--hair); color: var(--ink-2); }
+.kind.run { border-color: var(--verdigris); color: var(--verdigris); }
+.kind.decision { border-color: var(--gold); color: var(--gold); }
+.tl .sub { font-size: 13.5px; color: var(--ink-2); margin: 2px 0 0; }
+.tl .why { font-size: 12.5px; color: var(--ink-2); margin: 4px 0 0; font-family: var(--mono); word-break: break-word; }
+ul.changes { list-style: none; margin: 8px 0 0; padding: 0; }
+ul.changes > li { padding: 8px 0 8px 12px; border-left: 2px solid var(--hair); margin-bottom: 4px; }
+.diff { display: grid; grid-template-columns: 8.5em minmax(0, 1fr); gap: 2px 12px; margin-top: 4px; font-size: 13.5px; }
+.diff .lbl { color: var(--ink-2); font-size: 12.5px; padding-top: 2px; }
+.diff del, .diff ins { display: block; text-decoration: none; max-width: 80ch; }
+.diff del { color: var(--ink-2); }
+.diff del::before, .diff ins::before { font-size: 11px; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; margin-right: 6px; }
+.diff del::before { content: "Before"; }
+.diff ins::before { content: "After"; color: var(--verdigris); }
+.diff pre.sql { font-size: 12.5px; padding: 6px 8px; margin: 2px 0; }
+.diff .plus::before { content: "+ "; font-weight: 700; color: var(--verdigris); }
+.diff .minus::before { content: "− "; font-weight: 700; }
+.diff .minus { color: var(--ink-2); }
+ol.ctl { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
+ol.ctl > li { padding: 6px 0 8px 14px; border-left: 2px solid var(--hair); position: relative; }
+ol.ctl > li::before { content: ""; position: absolute; left: -5px; top: 11px; width: 8px; height: 8px; border-radius: 50%; background: var(--edge); }
+ol.ctl > li.decision::before { background: var(--gold); }
+ol.ctl > li.change::before { background: var(--verdigris); }
+ol.ctl .when { color: var(--ink-2); font-size: 12.5px; }
+@media (max-width: 860px) { ol.tl > li { grid-template-columns: minmax(0, 1fr); } .diff { grid-template-columns: minmax(0, 1fr); } }
+
 #rows[aria-busy="true"] { opacity: .55; transition: opacity .15s .1s; }
 .state { margin: 30px 0; padding: 26px; border: 1px dashed var(--hair); border-radius: 8px; color: var(--ink-2); max-width: 70ch; }
 .state.err { color: var(--conflict); border-color: var(--conflict); }
@@ -239,8 +275,10 @@ ul.work > li.is-new { box-shadow: inset 3px 0 0 var(--verdigris); }
     <div class="actions">
       <button class="btn primary" id="runAgent" hidden title="Runs the STTM agent as a Databricks job. It reads the deployed pipeline and Unity Catalog, updates the mapping, and writes column comments and tags where they changed.">Run agent</button>
       <button class="btn" id="csv" title="Save the rows on screen as a CSV file">Download CSV</button>
+      <button class="btn" id="xlsx" title="An Excel workbook for auditors: a cover sheet (date, table versions, counts, who generated it), one sheet per table with the columns that match the current filters, the open issues with their statuses, and the recent history">Download for audit</button>
       <button class="btn" id="refresh" title="Read the table again (results are otherwise cached for a minute)">Refresh</button>
     </div>
+    <p class="agent-line" id="xlsxLine" role="status" style="flex-basis:100%" hidden></p>
   </header>
 
   <section class="map-frame" aria-label="Lineage map. Select a table to filter on it.">
@@ -253,6 +291,7 @@ ul.work > li.is-new { box-shadow: inset 3px 0 0 var(--verdigris); }
         <button id="allBtn" aria-pressed="true">All columns<span class="n" id="nAll"></span></button>
         <button id="reviewBtn" aria-pressed="false">Needs review<span class="n" id="nOpen"></span></button>
         <button id="workBtn" aria-pressed="false" title="Open issues on the tables your teams own">My worklist<span class="n" id="nWork"></span></button>
+        <button id="histBtn" aria-pressed="false" title="Agent runs and what they changed, steward decisions and issue status changes, newest first">History</button>
       </div>
       <input class="field" id="q" type="search" placeholder="Search names, definitions and SQL" aria-label="Search names, definitions and SQL">
       <input class="field dep" id="dep" type="search" list="cols" placeholder="Show what depends on a column or table" aria-label="Show what depends on a column or table">
@@ -285,6 +324,8 @@ const fold = {};   // table -> true (expanded) / false (collapsed), set by the u
 let meta = null, rows = [], timer = null, seq = 0;
 let me = null, gloss = {}, editing = null, stewardMsg = null, allRows = {};   // signed-in user, steward decisions by column key
 let issues = [], owners = [], issueMsg = null, showClosed = false, allTeams = false;   // tracked issues + owner statuses
+let hist = null, histLoading = null, histErr = null;   // /api/history, loaded on first use
+const histUi = { kind: "all", quiet: false, open: new Set() };   // History tab: type filter, no-op runs, expanded runs
 let prevVisit;   // ms of the previous visit (undefined = not read yet, null = first visit)
 
 const $ = (id) => document.getElementById(id);
@@ -312,7 +353,7 @@ function readUrl() {
   state.q = p.get("q") || "";
   state.depends_on = p.get("depends_on") || "";
   state.open = p.get("open");
-  state.view = p.get("view") === "worklist" ? "worklist" : "ledger";
+  state.view = ["worklist", "history"].includes(p.get("view")) ? p.get("view") : "ledger";
   $("q").value = state.q;
   $("dep").value = state.depends_on;
 }
@@ -325,7 +366,7 @@ function params(extra = {}) {
   return p;
 }
 function syncUrl() {
-  const p = params({ ...(state.open ? { open: state.open } : {}), ...(state.view === "worklist" ? { view: "worklist" } : {}) });
+  const p = params({ ...(state.open ? { open: state.open } : {}), ...(state.view !== "ledger" ? { view: state.view } : {}) });
   history.replaceState(null, "", p.toString() ? `?${p}` : location.pathname);
 }
 async function getJson(url) {
@@ -464,11 +505,12 @@ function renderChips() {
   if (state.depends_on) chips.push(["depends_on", state.depends_on, `Depends on ${state.depends_on}`]);
   $("chips").innerHTML = chips.map(([k, v, l]) => `<span class="chip">${esc(l)}<button data-chip="${esc(k)}" data-v="${esc(v)}" aria-label="Remove filter ${esc(l)}">×</button></span>`).join("")
     + (chips.length + ((state.filters.issue || new Set()).has("OPEN") ? 1 : 0) > 1 ? `<button class="linkish" data-chip="*">Clear all filters</button>` : "");
-  const review = (state.filters.issue || new Set()).has("OPEN"), work = state.view === "worklist";
-  $("allBtn").setAttribute("aria-pressed", String(!review && !work));
-  $("reviewBtn").setAttribute("aria-pressed", String(review && !work));
-  $("workBtn").setAttribute("aria-pressed", String(work));
-  for (const id of ["q", "dep", "menus", "chips"]) $(id).hidden = work;
+  const review = (state.filters.issue || new Set()).has("OPEN"), other = state.view !== "ledger";
+  $("allBtn").setAttribute("aria-pressed", String(!review && !other));
+  $("reviewBtn").setAttribute("aria-pressed", String(review && !other));
+  $("workBtn").setAttribute("aria-pressed", String(state.view === "worklist"));
+  $("histBtn").setAttribute("aria-pressed", String(state.view === "history"));
+  for (const id of ["q", "dep", "menus", "chips"]) $(id).hidden = other;
 }
 
 /* ---------- ledger ---------- */
@@ -579,6 +621,7 @@ function detailHtml(r, key) {
         <dt>First seen</dt><dd>${esc(fmtRun(r.first_seen_run))}</dd>
         <dt>Last changed</dt><dd>${esc(fmtRun(r.last_changed_run))}</dd>
       </dl>
+      <h4>History of this column</h4>${columnHistoryHtml(key)}
       <div class="row-actions">
         ${r.layer !== "gold" ? `<button class="btn" data-impact="${esc(key)}">Show what depends on this column</button>` : ""}
         <button class="btn" data-copy="${esc(r.uc_table)}.${esc(r.target_column)}">Copy full column name</button>
@@ -645,7 +688,7 @@ async function decide(key, action, text) {
       body: JSON.stringify({ column: key, action, definition: text ?? null }) });
     const body = await r.json();
     if (!r.ok) throw new Error(body.detail || r.statusText);
-    editing = null;
+    editing = null; hist = null;
     stewardMsg = { key, text: { approve: "Approved.", edit: "Saved.", ack: "Confirmed.", remove: "Removed from the glossary." }[action] + " Run the agent to apply it." };
     await loadSteward();
   } catch (e) {
@@ -752,7 +795,7 @@ async function saveStatus(k, box) {
     const r = await fetch("api/issues/status", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const out = await r.json();
     if (!r.ok) throw new Error(out.detail || r.statusText);
-    issueMsg = { k, text: "Saved." };
+    issueMsg = { k, text: "Saved." }; hist = null;
     await loadIssues(true);
   } catch (e) {
     issueMsg = { k, text: `Couldn't save: ${e.message}`, err: true };
@@ -760,6 +803,137 @@ async function saveStatus(k, box) {
     if (p) p.remove();
     box.insertAdjacentHTML("beforeend", `<p class="triage-who err" role="status">${esc(issueMsg.text)}</p>`);
   }
+}
+
+/* ---------- history ---------- */
+const FIELD = { business_definition: "Definition", definition_source: "Definition source", transformation: "Rule",
+  table_rule: "Table rule", issues: "Issues", proposed_definition: "Suggested definition", source_columns: "Sources",
+  data_type: "Type", owner: "Owner", is_active: "Active" };
+const DECISION = { seeded: "Seeded from glossary.toml", definition: "Set the definition", confirmed: "Confirmed still correct",
+  removed: "Removed from the glossary", note: "Changed the note" };
+const CHANGE = { new: "New column", updated: "Changed", removed: "Removed", restored: "Back in the pipeline" };
+async function loadHistory(refresh = false) {
+  if (hist && !refresh) return hist;
+  if (!histLoading) {
+    histLoading = getJson(`api/history${refresh ? "?refresh=true" : ""}`)
+      .then((h) => { hist = h; histErr = null; })
+      .catch((e) => { histErr = e.message; })
+      .finally(() => { histLoading = null; if (state.view === "history") renderHistory(); else if (state.open && rows.length) renderRows(); });
+  }
+  return histLoading;
+}
+const changed = (r) => (r.rows_inserted || 0) + (r.rows_updated || 0) + (r.rows_deactivated || 0);
+const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+function valHtml(field, v) {
+  if (v == null || v === "") return `<i>none</i>`;
+  if (field === "transformation" || field === "table_rule") return `<pre class="sql">${hl(v)}</pre>`;
+  if (field === "definition_source") return esc(SOURCE[v] || v);
+  return esc(v);
+}
+function diffHtml(fields, kind) {
+  const names = Object.keys(fields).filter((f) => kind !== "new" || ["business_definition", "definition_source"].includes(f));
+  if (!names.length) return `<p class="sub">Only the lineage fingerprint changed (something upstream was re-read); nothing shown here changed.</p>`;
+  return `<div class="diff">${names.map((f) => {
+    const { before, after } = fields[f];
+    let body;
+    if (Array.isArray(before) || Array.isArray(after)) {
+      const b = before || [], a = after || [];
+      const plus = a.filter((x) => !b.includes(x)), minus = b.filter((x) => !a.includes(x));
+      body = [...plus.map((x) => `<span class="plus">${esc(x)}</span>`), ...minus.map((x) => `<span class="minus">${esc(x)}</span>`)].join("<br>") || "<i>reordered</i>";
+    } else if (f === "is_active") {
+      body = after ? "Back in the pipeline" : "No longer in the pipeline";
+    } else if (kind === "new") {
+      body = valHtml(f, after);
+    } else {
+      body = `<del>${valHtml(f, before)}</del><ins>${valHtml(f, after)}</ins>`;
+    }
+    return `<span class="lbl">${esc(FIELD[f] || f)}</span><div>${body}</div>`;
+  }).join("")}</div>`;
+}
+function decisionHtml(d, withColumn) {
+  const what = DECISION[d.action] || d.action;
+  const body = d.action === "definition" || d.action === "seeded"
+    ? `<div class="diff">${d.before ? `<span class="lbl">Definition</span><div><del>${esc(d.before)}</del><ins>${esc(d.after)}</ins></div>` : `<span class="lbl">Definition</span><div>${esc(d.after)}</div>`}</div>`
+    : d.action === "removed" && d.before ? `<p class="sub">It was: “${esc(d.before)}”</p>` : "";
+  return `<div class="head"><span class="kind decision">Steward</span><span class="what">${esc(what)}</span>${withColumn ? colRef(d.column) : ""}</div>
+    <p class="sub">${d.action === "seeded" ? "Loaded once from the repo file." : `By ${esc(d.who || "unknown (not in the table history any more)")}`}${d.note ? `. Note: “${esc(d.note)}”` : ""}</p>${body}`;
+}
+function statusHtml(x, withColumn) {
+  const parts = [];
+  if (x.before !== x.after) parts.push(`${STATUS[x.before] || x.before} → <b>${STATUS[x.after] || x.after}</b>`);
+  if ((x.assignee || null) !== (x.assignee_before || null)) parts.push(x.assignee ? `assigned to ${esc(x.assignee)}` : "unassigned");
+  if ((x.comment || null) !== (x.comment_before || null) && x.comment) parts.push(`“${esc(x.comment)}”`);
+  return `<div class="head"><span class="kind">Status</span><span class="what">${flagHtml(x.issue_type)}</span>${withColumn ? colRef(x.column) : ""}</div>
+    <p class="sub">${parts.join(", ") || "Saved without changes"}. By ${esc(x.who)}.</p>`;
+}
+function runHtml(r) {
+  const n = changed(r), open = histUi.open.has(r.run_id), who = r.requested_by ? `Started by ${esc(r.requested_by)}` : "Who started it was not recorded (command line, or the job started outside the app)";
+  const reasons = Object.entries(r.reasons || {}).map(([t, why]) => `${t}: ${Array.isArray(why) ? why.join(", ") : why}`);
+  const issueBits = [r.issues_opened.length ? plural(r.issues_opened.length, "issue") + " opened" : "", r.issues_resolved.length ? plural(r.issues_resolved.length, "issue") + " closed" : ""].filter(Boolean);
+  return `<div class="head"><span class="kind run">Agent run</span><span class="what">${n ? `${plural(n, "column")} changed` : "Nothing changed"}</span><span class="sub">${esc(r.mode)}, ${plural(r.tables_processed || 0, "table")} processed${r.llm_calls ? `, ${plural(r.llm_calls, "LLM call")}` : ""}${r.seconds != null ? `, ${r.seconds} s` : ""}</span></div>
+    <p class="sub">${who}.${n ? ` ${r.rows_inserted} new, ${r.rows_updated} updated, ${r.rows_deactivated} removed.` : ""}${issueBits.length ? ` ${issueBits.join(", ")}.` : ""}</p>
+    ${reasons.length ? `<p class="why">${reasons.map(esc).join("<br>")}</p>` : ""}
+    ${r.changes.length || issueBits.length ? `<button class="linkish" data-histrun="${esc(r.run_id)}" aria-expanded="${open}">${open ? "Hide" : "Show"} what changed</button>` : ""}
+    ${open ? `<ul class="changes">${r.changes.map((c) => `<li><div class="head">${colRef(c.column)}<span class="kind">${esc(CHANGE[c.kind] || c.kind)}</span></div>${diffHtml(c.fields, c.kind)}</li>`).join("")}
+      ${r.issues_opened.map((i) => `<li><div class="head">${colRef(i.column)}<span class="kind">Issue opened</span>${flagHtml(i.issue_type)}</div><p class="sub">${esc(i.text)}</p></li>`).join("")}
+      ${r.issues_resolved.map((i) => `<li><div class="head">${colRef(i.column)}<span class="kind">Issue closed</span>${flagHtml(i.issue_type)}</div><p class="sub">${esc(i.text)}</p></li>`).join("")}</ul>` : ""}`;
+}
+function histState() {
+  if (histErr) return `<div class="state err">Couldn't read the history: ${esc(histErr)}<br><button class="btn" data-histretry="1">Try again</button></div>`;
+  if (!hist) { loadHistory(); return `<div class="state">Reading the history from the change data feed…</div>`; }
+  return null;
+}
+function renderHistory() {
+  const wait = histState();
+  if (wait) { $("summary").textContent = ""; $("rows").innerHTML = wait; return; }
+  const items = [
+    ...hist.runs.map((r) => ({ type: "run", at: r.started_at, r })),
+    ...hist.decisions.map((d) => ({ type: "decision", at: d.at, d })),
+    ...hist.statuses.map((x) => ({ type: "status", at: x.at, x })),
+  ].sort((a, b) => b.at.localeCompare(a.at));
+  const quiet = hist.runs.filter((r) => !changed(r) && !r.issues_opened.length && !r.issues_resolved.length).length;
+  const shown = items.filter((i) => (histUi.kind === "all" || histUi.kind === i.type)
+    && (histUi.quiet || i.type !== "run" || changed(i.r) || i.r.issues_opened.length || i.r.issues_resolved.length));
+  $("summary").innerHTML = `<b>${hist.runs.length}</b> agent runs, <b>${hist.decisions.length}</b> steward decisions and <b>${hist.statuses.length}</b> issue status changes, newest first. Read from the change data feed of the mapping, glossary and issue tables.`
+    + `<span class="hist-tools"><label>Show <select id="histKind">${[["all", "Everything"], ["run", "Agent runs"], ["decision", "Steward decisions"], ["status", "Issue statuses"]].map(([v, l]) => `<option value="${v}" ${histUi.kind === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>`
+    + (quiet ? `<button class="linkish" data-histquiet="1">${histUi.quiet ? "Hide" : "Show"} ${plural(quiet, "run")} that changed nothing</button>` : "") + `</span>`
+    + hist.notes.map((n) => `<p class="hist-note">${esc(n)}</p>`).join("");
+  if (!shown.length) { $("rows").innerHTML = `<div class="state">Nothing in the history for this choice.</div>`; return; }
+  $("rows").innerHTML = `<ol class="tl">${shown.map((i) => {
+    const quietRun = i.type === "run" && !changed(i.r) && !i.r.issues_opened.length && !i.r.issues_resolved.length;
+    return `<li class="${quietRun ? "quiet" : ""}"><span class="when">${esc(fmtMs(Date.parse(i.at)))}</span><div>${
+      i.type === "run" ? runHtml(i.r) : i.type === "decision" ? decisionHtml(i.d, true) : statusHtml(i.x, true)}</div></li>`;
+  }).join("")}</ol>`;
+}
+// The column detail's timeline: what the agent changed on it, the issues it opened and closed, decisions and statuses.
+function columnHistoryHtml(key) {
+  const wait = histState();
+  if (wait) return histErr ? `<p class="meta">Couldn't read the history: ${esc(histErr)}</p>` : `<p class="meta">Reading the history…</p>`;
+  const ev = [];
+  for (const r of hist.runs) {
+    for (const c of r.changes) if (c.column === key) ev.push({ at: c.at || r.started_at, cls: "change", html: `<b>${esc(CHANGE[c.kind] || c.kind)}</b> by the agent${r.requested_by ? ` (run started by ${esc(r.requested_by)})` : ""}${diffHtml(c.fields, c.kind)}` });
+    for (const i of r.issues_opened) if (i.column === key) ev.push({ at: r.started_at, cls: "", html: `${flagHtml(i.issue_type)} opened by the agent<p class="sub">${esc(i.text)}</p>` });
+    for (const i of r.issues_resolved) if (i.column === key) ev.push({ at: r.started_at, cls: "", html: `${flagHtml(i.issue_type)} closed: the agent no longer reports it` });
+  }
+  for (const d of hist.decisions) if (d.column === key) ev.push({ at: d.at, cls: "decision", html: decisionHtml(d, false) });
+  for (const x of hist.statuses) if (x.column === key) ev.push({ at: x.at, cls: "", html: statusHtml(x, false) });
+  if (!ev.length) return `<p class="meta">No recorded change since the history starts.</p>`;
+  ev.sort((a, b) => b.at.localeCompare(a.at));
+  return `<ol class="ctl">${ev.map((e) => `<li class="${e.cls}"><span class="when">${esc(fmtMs(Date.parse(e.at)))}</span><div>${e.html}</div></li>`).join("")}</ol>`;
+}
+async function downloadAudit() {
+  const btn = $("xlsx"), line = $("xlsxLine");
+  btn.disabled = true; btn.textContent = "Preparing…"; line.hidden = true;
+  try {
+    const r = await fetch(`api/export.xlsx?${params()}`);
+    if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch (e) { /* not JSON */ } throw new Error(m); }
+    const name = (r.headers.get("content-disposition") || "").match(/filename="([^"]+)"/)?.[1] || "sttm_audit.xlsx";
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await r.blob()); a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  } catch (e) {
+    line.hidden = false; line.className = "agent-line failed"; line.textContent = `Couldn't build the audit workbook: ${e.message}`;
+  } finally { btn.disabled = false; btn.textContent = "Download for audit"; }
 }
 
 /* ---------- agent runs ---------- */
@@ -784,6 +958,7 @@ function renderAgent(a) {
   if (agentWasActive) {   // a run just ended: show its result and reload the mapping
     agentWasActive = false;
     line.textContent = "The agent finished. Reloading the mapping…";
+    hist = null;
     loadMeta(true).then(() => loadRows(true)).then(loadSteward).then(() => loadIssues(true)).finally(() => loadAgent(true));
     return;
   }
@@ -825,12 +1000,13 @@ async function loadRows(refresh = false) {
   renderChips();
   if (meta) renderMap();
   if (state.view === "worklist") { renderWorklist(); return; }
+  if (state.view === "history") { renderHistory(); return; }
   $("rows").setAttribute("aria-busy", "true");
   try {
     const data = await getJson(`api/sttm?${params(refresh ? { refresh: "true" } : {})}`);
     if (my !== seq) return;
     rows = data.rows;
-    if (state.view === "worklist") return;
+    if (state.view !== "ledger") return;
     for (const r of rows) allRows[`${r.target_table}.${r.target_column}`] = r;
     renderRows();
     renderPending();
@@ -854,6 +1030,7 @@ function clearAll() {
 function update() { renderMenus(); loadRows(); }
 
 document.addEventListener("change", (e) => {
+  if (e.target.id === "histKind") { histUi.kind = e.target.value; renderHistory(); $("histKind")?.focus(); return; }
   const f = e.target.dataset.f;
   if (!f) return;
   toggle(f, e.target.value, e.target.checked);
@@ -913,9 +1090,18 @@ document.addEventListener("click", (e) => {
     state.view = "ledger";
     toggle("issue", "OPEN", t.id === "reviewBtn");
     update();
-  } else if (t.id === "workBtn") {
-    state.view = "worklist"; state.open = null;
+  } else if (t.id === "workBtn" || t.id === "histBtn") {
+    state.view = t.id === "workBtn" ? "worklist" : "history"; state.open = null;
     update();
+  } else if (t.dataset.histrun) {
+    const id = t.dataset.histrun;
+    if (histUi.open.has(id)) histUi.open.delete(id); else histUi.open.add(id);
+    renderHistory();
+    document.querySelector(`button[data-histrun="${cssEsc(id)}"]`)?.focus();
+  } else if (t.dataset.histquiet) {
+    histUi.quiet = !histUi.quiet; renderHistory();
+  } else if (t.dataset.histretry) {
+    hist = null; histErr = null; loadHistory(true);
   }
 });
 document.addEventListener("keydown", (e) => {
@@ -924,8 +1110,13 @@ document.addEventListener("keydown", (e) => {
 });
 $("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { state.q = $("q").value.trim(); loadRows(); }, 300); });
 for (const ev of ["change", "search"]) $("dep").addEventListener(ev, () => { state.depends_on = $("dep").value.trim(); loadRows(); });
-$("refresh").addEventListener("click", async () => { await loadMeta(true); await loadRows(true); await loadSteward(); loadIssues(true); });
+$("refresh").addEventListener("click", async () => {
+  hist = null; histErr = null;
+  await loadMeta(true); await loadRows(true); await loadSteward(); await loadIssues(true);
+  if (state.view === "history" || state.open) loadHistory(true);
+});
 $("runAgent").addEventListener("click", startAgent);
+$("xlsx").addEventListener("click", downloadAudit);
 $("csv").addEventListener("click", () => {
   if (!rows.length) return;
   const cols = Object.keys(rows[0]);

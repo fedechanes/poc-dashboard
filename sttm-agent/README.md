@@ -6,7 +6,7 @@ A small, reproducible proof of concept. It covers four things:
 - **STTM.** A source-to-target mapping with one row per target column: source columns, transformation, type, business definition, owner, layer and lineage path back to bronze. It is kept as a Delta table, flattened into a second table (`sttm_export`, same columns as the CSV) and exported to [`output/sttm.csv`](output/sttm.csv) and [`output/sttm.md`](output/sttm.md).
 - **Agent.** It reads the deployed pipeline SQL plus Unity Catalog (UC) metadata and lineage. It drafts missing definitions with a Foundation Model API LLM and writes them back as **column comments and tags**. It also flags gaps and conflicts.
 - **Incremental updates.** Both the data and the metadata are refreshed incrementally. The [answer](#incremental-updates-the-answer) comes with evidence from a demo run.
-- **Viewer app.** A small web app over `sttm_export` with filters and impact analysis. Stewards approve definitions in it, and owners work through the issues on their tables, with an email from a SQL alert when an agent run finds new ones. It runs locally or as a Databricks App ([viewer app](#viewer-app)).
+- **Viewer app.** A small web app over `sttm_export` with filters and impact analysis. Stewards approve definitions in it, and owners work through the issues on their tables, with an email from a SQL alert when an agent run finds new ones. A History tab shows who changed what and when, and **Download for audit** saves it all as an Excel workbook. It runs locally or as a Databricks App ([viewer app](#viewer-app)).
 
 It lives next to the dashboard-embedding POC in this repo but shares nothing with it except `pyproject.toml`. It has its own folder, its own schemas (`<catalog>.sttm_*`) and its own pipeline.
 
@@ -61,7 +61,7 @@ sttm_meta     sttm, sttm_export, table_fingerprints, uc_lineage, agent_state, ag
 | [`sttm/sqlparse.py`](sttm/sqlparse.py) | Lakeflow SQL → per-column expression and sources (sqlglot), plus table rules (joins, filters, dedup, grain, AUTO CDC). |
 | [`sttm/agent.py`](sttm/agent.py) | The agent: change detection, definitions, checks, MERGE, write-back, export. |
 | [`run.py`](run.py) | The CLI above, including the demo. |
-| [`app/`](app) | The viewer app: FastAPI ([`app.py`](app/app.py)) and one static page ([`static/index.html`](app/static/index.html)), plus [`app.yaml`](app/app.yaml) for Databricks Apps. |
+| [`app/`](app) | The viewer app: FastAPI ([`app.py`](app/app.py)) and one static page ([`static/index.html`](app/static/index.html)), plus [`app.yaml`](app/app.yaml) for Databricks Apps. [`history.py`](app/history.py) reads the audit history from change data feed; [`audit.py`](app/audit.py) builds the Excel workbook. |
 
 ## The STTM table
 
@@ -176,7 +176,7 @@ The change data feed of `sttm_meta.sttm` for that run shows exactly these rows:
 
 5. Runs the agent again with nothing changed: **0 tables processed, 0 rows, 0 LLM calls, 0 DDL**.
 
-The run log is also in `sttm_meta.agent_runs`: one row per run, with counts, the reasons each table was processed, and the issues the run opened (`details.new_issues`).
+The run log is also in `sttm_meta.agent_runs`: one row per run, with counts, the reasons each table was processed, the issues the run opened (`details.new_issues`), and the versions of the `sttm` table before and after the run (`details.sttm_version_before`, `sttm_version`).
 
 ### Gaps and conflicts it finds (current [`output/sttm.md`](output/sttm.md))
 
@@ -234,7 +234,7 @@ The command:
    - the agent job (`agent-job`, *Can manage run*).
 
    [`app.yaml`](app/app.yaml) passes them to the app as `DATABRICKS_WAREHOUSE_ID` and `STTM_JOB_ID`.
-3. Grants the app's service principal read access to six tables only: `USE CATALOG` on the catalog, `USE SCHEMA` on `sttm_meta`, and `SELECT` on `sttm_export`, `agent_runs`, `glossary`, `owners`, `issues` and `issue_status`. It grants the stewards group (`STTM_STEWARDS_GROUP`, default `sttm-stewards`) `SELECT` and `MODIFY` on `glossary` and `issue_status`, grants every member of an owner team `SELECT` and `MODIFY` on `issue_status`, and turns on user authorization for the app with the `sql` scope.
+3. Grants the app's service principal read access to seven tables only: `USE CATALOG` on the catalog, `USE SCHEMA` on `sttm_meta`, and `SELECT` on `sttm_export`, `sttm` (for the History tab, see [history](#history-and-download-for-audit)), `agent_runs`, `glossary`, `owners`, `issues` and `issue_status`. It grants the stewards group (`STTM_STEWARDS_GROUP`, default `sttm-stewards`) `SELECT` and `MODIFY` on `glossary` and `issue_status`, grants every member of an owner team `SELECT` and `MODIFY` on `issue_status`, and turns on user authorization for the app with the `sql` scope.
 4. Creates or updates one SQL alert per owner team in `/Workspace/Users/<you>/sttm-agent/alerts`, and adds one alert task per team to the agent job (see [notifications](#owners-worklist-and-notifications)).
 5. Uploads `app/` to `/Workspace/Users/<you>/sttm-agent/app` and deploys it. It prints the app URL. Viewers sign in with their Databricks account and need *Can use* on the app.
 
@@ -320,6 +320,50 @@ Limits:
 - **Free Edition allows 5 concurrent job tasks per account** ([limitations](https://docs.databricks.com/aws/en/getting-started/free-edition-limitations)). The 4 alert tasks run in parallel after the agent task. With more teams they would wait for a free slot.
 - An alert's result table in the mail shows at most the first 100 rows.
 
+### History and Download for audit
+
+**History** (the fourth button next to *My worklist*, or `?view=history`) lists, newest first:
+
+- **Agent runs:** when, who started it (`details.requested_by`), the tables processed and why, how many columns were new, updated or removed, and the issues opened and closed. *Show what changed* lists each changed column with its definition, rule (transformation), table rule, issues and definition source **before and after**. Runs that changed nothing are hidden behind a link.
+- **Steward decisions** (set or edited a definition, confirmed "still correct", removed from the glossary) and **issue status changes** (status, assignee, comment), each with the person who made it.
+
+The column detail has the same story for one column under *History of this column*: what the agent changed on it, the issues it opened and closed, and the decisions and statuses, in time order.
+
+Everything is read from [change data feed](https://docs.databricks.com/aws/en/delta/delta-change-data-feed) with [`table_changes()`](https://docs.databricks.com/aws/en/sql/language-manual/functions/table_changes):
+
+| What | Read from | Who |
+|---|---|---|
+| Column changes of a run | `table_changes('<cat>.sttm_meta.sttm', …)`, `update_preimage` / `update_postimage` pairs, for the commit versions in (`details.sttm_version_before`, `sttm_version`]. Runs logged before this was recorded use the previous run's `sttm_version`, which is the same thing because only the agent writes `sttm`. | `agent_runs.details.requested_by` |
+| Issues opened and closed | `issues` CDF (`is_open` false → true and back) | the agent |
+| Steward decisions | `glossary` CDF | `updated_by` (`current_user()` when the row was written). A removed row keeps no `updated_by`, so the app takes the commit's `userName` from [`DESCRIBE HISTORY`](https://docs.databricks.com/aws/en/sql/language-manual/delta-describe-history). |
+| Issue statuses | `issue_status` CDF | `updated_by` |
+
+`table_changes` needs only `SELECT` on the table, so the app's service principal stays read-only: `app-deploy` adds `SELECT` on `sttm` to its grants, and it already read the other three tables. `DESCRIBE HISTORY` also worked as the service principal.
+
+**Retention.** Change data is only readable while the table keeps its files and log. On Unity Catalog managed tables, [predictive optimization](https://docs.databricks.com/aws/en/optimizations/predictive-optimization) runs `VACUUM` automatically, which deletes change files older than `delta.deletedFileRetentionDuration` (default 7 days), and table history is kept for 30 days by default. The agent therefore sets `delta.deletedFileRetentionDuration` and `delta.logRetentionDuration` to `STTM_HISTORY_RETENTION_DAYS` (default 30) on `sttm`, `glossary`, `issues` and `issue_status`, and only on those (`ensure_meta`, so `setup`, `agent` and `app-deploy` apply it; safe to re-run). If the oldest versions are gone anyway, the history starts at the oldest readable version and the page says so.
+
+**Download for audit** (masthead) builds an `.xlsx` in the app with [openpyxl](https://openpyxl.readthedocs.io/). It respects the filters on screen (table, layer, issue type, search, *depends on*, …):
+
+| Sheet | Content |
+|---|---|
+| Cover | When (UTC), who generated it (the signed-in user), the source table, the filters, the current Delta version of `sttm`, `sttm_export`, `glossary`, `issue_status` and `issues`, the latest agent run and the `sttm` version it wrote, and counts: columns, tables, columns to review, open issues by status, definitions by source. |
+| One per table | The rows of that table, with the same columns as `sttm_export` / the CSV. |
+| Open issues | Open issues on those columns, with status, assignee, comment, who set it and when. |
+| Recent history | The last `STTM_AUDIT_HISTORY_DAYS` (default 30) days, one line per changed field: agent runs, column changes, issues opened and closed, steward decisions and statuses. With filters, only lines for the filtered columns (runs are always listed). |
+
+Text that starts with `=`, `+`, `-` or `@` is stored as text, never as a formula.
+
+Measured in this workspace (19 runs, 190 column changes, 8 decisions, 8 status changes):
+- `/api/history` takes 2.8 s locally and 4.6 s in the deployed app on a warm warehouse. Its seven statements (five change feeds, `agent_runs`, versions) run in parallel. Results are cached for 60 s like the rest; a decision or a status change clears the cache.
+- The full workbook is 80 KB (12 sheets, 260 history lines); filtered to gold it is 20–25 KB. It builds in about 2.7 s.
+- Verified in History, locally and in the deployed app: the `silver.products.category` cycle (LLM draft → human UC comment "Product category as shown in the web shop menu." → comment cleared, new LLM draft), the phase A decisions (`order_count` edited, `avg_order_value_eur` and `orders` set, `order_date` confirmed) and the phase B statuses. A status set and reset in the deployed app appeared with the signed-in user as `updated_by`, and the next job run (102 s, `requested_by=phase-c-test`) recorded `sttm_version_before`.
+- The UI was tested with jsdom against both the local and the deployed app (History tab, run details, column timeline, filtered download).
+
+Limits:
+- **Not a permanent audit store.** The history covers the retention window (30 days by default). Keeping it for years needs an append-only audit table that the agent fills from the change feed on each run.
+- A `full` agent run rewrites every row; History shows those rows as "only the lineage fingerprint changed" when nothing visible changed.
+- Who *started* a run is recorded only for runs started from the app (`requested_by`). Runs from the command line show "not recorded".
+
 ## Feasibility on Free Edition (checked against the workspace)
 
 | Capability | Result in this workspace | Docs |
@@ -346,5 +390,6 @@ Limits:
 - **LLM drafts are drafts.** Each draft is verified by a second judge call and fixed when it disagrees, but a few still over-generalise, for example "includes all customers…". They are tagged `sttm_definition_source=llm`. Approving it in the viewer app makes it governed, and the next run rewrites only that column.
 - **Parser coverage.** It covers the SQL constructs used here: CTEs, joins, `QUALIFY`, aggregate `FILTER`, AUTO CDC and `read_files`. Python pipelines and UDFs are not parsed; there, UC column lineage would be the only source.
 - **Table comments.** These are not yet checked; for example, the `daily_sales` table comment still says "excluding cancelled and returned".
+- **History is bounded by retention.** See [History and Download for audit](#history-and-download-for-audit).
 - **Last visit is per browser.** The worklist's **New** marker compares with a timestamp in local storage, not with a server-side record of the user's visits.
 - **Scheduling.** The agent runs locally or as the `sttm-agent` job (the app's Run agent button). It is not yet triggered automatically after each pipeline update; a job with a pipeline task followed by the agent task would do that.

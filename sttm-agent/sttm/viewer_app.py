@@ -4,7 +4,8 @@ Safe to re-run: creates the job and the app once, then updates and redeploys the
 - The agent job runs `run.py agent` on serverless compute as the person who deploys (it writes comments and tags,
   reads system tables and calls the LLM, so it keeps the deployer's permissions).
 - The app runs as its own service principal. It can use the SQL warehouse, start the agent job (CAN_MANAGE_RUN),
-  and read six tables: sttm_export, agent_runs, glossary, owners, issues and issue_status. Nothing else.
+  and read seven tables: sttm_export, sttm (its change data feed, for History), agent_runs, glossary, owners, issues
+  and issue_status. Nothing else.
 - Steward and owner actions run as the signed-in user (user authorization, `sql` scope). The stewards group
   (STTM_STEWARDS_GROUP, default sttm-stewards) gets SELECT + MODIFY on glossary and issue_status; the members of each
   owner team (sttm_meta.owners) get SELECT + MODIFY on issue_status. The group itself and its members are managed
@@ -27,14 +28,26 @@ from databricks.sdk.service import sql as S
 from databricks.sdk.service.workspace import ImportFormat
 
 from . import agent
-from .config import CATALOG, DEFAULT_OWNER, LLM_ENDPOINT, META, PIPELINE_NAME, PREFIX, ROOT, SCHEMAS, run_sql, sql_str
+from .config import (
+    CATALOG,
+    DEFAULT_OWNER,
+    HISTORY_RETENTION_DAYS,
+    LLM_ENDPOINT,
+    META,
+    PIPELINE_NAME,
+    PREFIX,
+    ROOT,
+    SCHEMAS,
+    run_sql,
+    sql_str,
+)
 
 APP_NAME = os.getenv("STTM_APP_NAME", "sttm-viewer")
 STEWARDS = os.getenv("STTM_STEWARDS_GROUP", "sttm-stewards")
 USER_SCOPES = ["sql"]   # user authorization: steward writes run as the signed-in user
 JOB_NAME = os.getenv("STTM_JOB_NAME", "sttm-agent")
 APP_DIR = ROOT / "app"
-APP_FILES = ["app.py", "requirements.txt", "static/index.html"]
+APP_FILES = ["app.py", "history.py", "audit.py", "requirements.txt", "static/index.html"]
 AGENT_DEPENDENCIES = ["databricks-sdk>=0.170.0", "sqlglot>=30.35.0"]
 ALERT_PREFIX = "STTM new issues: "   # + owner team; alerts with this prefix in <user dir>/sttm-agent/alerts are ours
 
@@ -62,7 +75,8 @@ def ensure_agent_job(w: WorkspaceClient, state: dict, alerts: dict[str, str] | N
     # settings only, no credentials: the job authenticates as its owner on serverless compute
     files[".env"] = "".join(f"{k}={v}\n" for k, v in {
         "STTM_CATALOG": CATALOG, "STTM_PREFIX": PREFIX, "STTM_PIPELINE_NAME": PIPELINE_NAME,
-        "STTM_LLM_ENDPOINT": LLM_ENDPOINT, "STTM_DEFAULT_OWNER": DEFAULT_OWNER}.items() if v)
+        "STTM_LLM_ENDPOINT": LLM_ENDPOINT, "STTM_DEFAULT_OWNER": DEFAULT_OWNER,
+        "STTM_HISTORY_RETENTION_DAYS": str(HISTORY_RETENTION_DAYS)}.items() if v)
     _upload(w, base, files)
     settings = J.JobSettings(
         name=JOB_NAME, max_concurrent_runs=1, tags={"project": "sttm-agent"},
@@ -212,7 +226,9 @@ def ensure_app(w: WorkspaceClient, warehouse_id: str, job_id: int, log=print) ->
     return app
 
 
-APP_READS = ("sttm_export", "agent_runs", "glossary", "owners", "issues", "issue_status")
+# sttm: the History tab reads its change data feed (table_changes needs SELECT on the table); the other history
+# tables (glossary, issues, issue_status) are read already
+APP_READS = ("sttm_export", "sttm", "agent_runs", "glossary", "owners", "issues", "issue_status")
 
 
 def grant_read(w: WorkspaceClient, app: A.App, log=print) -> None:

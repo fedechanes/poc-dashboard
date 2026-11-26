@@ -11,6 +11,7 @@ warehouse come from the app's service principal and its sql-warehouse resource).
   STTM_JOB_ID              the agent job that "Run agent" starts (locally: from sttm_state.json; none = no button)
   STTM_STEWARDS_GROUP      group whose members may approve definitions and run the agent (default sttm-stewards;
                            empty = anyone who can open the app)
+  STTM_AUDIT_HISTORY_DAYS  days of history in the "Download for audit" workbook (default 30)
 
 Reads run as the app's service principal. Steward actions (approve, edit, "still correct") and issue statuses run as
 the signed-in user with the token Databricks Apps forwards (user authorization, `sql` scope), so Unity Catalog checks
@@ -26,11 +27,13 @@ import threading
 import time
 from pathlib import Path
 
+import audit
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.sql import StatementParameterListItem, StatementState
 from databricks.sdk.service.jobs import RunLifeCycleState
+from databricks.sdk.service.sql import StatementParameterListItem, StatementState
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
+from history import History
 from pydantic import BaseModel
 
 HERE = Path(__file__).resolve().parent
@@ -55,6 +58,7 @@ PREFIX = os.getenv("STTM_PREFIX", "sttm")
 TABLE_NAME = os.getenv("STTM_EXPORT_TABLE") or f"{CATALOG}.{PREFIX}_meta.sttm_export"
 TABLE = ".".join(f"`{p.strip('`')}`" for p in TABLE_NAME.split("."))
 CACHE_SECONDS = int(os.getenv("STTM_APP_CACHE_SECONDS", "60"))
+AUDIT_HISTORY_DAYS = int(os.getenv("STTM_AUDIT_HISTORY_DAYS", "30"))
 
 # Filters: query parameter -> SQL column. Every filter takes several values (OR within a filter, AND across).
 EQ_FILTERS = {"table": "target_table", "layer": "layer", "owner": "owner", "definition_source": "definition_source",
@@ -87,6 +91,7 @@ def _warehouse_id() -> str:
 
 WAREHOUSE_ID = _warehouse_id()
 JOB_ID = int(os.getenv("STTM_JOB_ID") or _local_state().get("job_id") or 0) or None
+META_SCHEMA = TABLE.rsplit(".", 1)[0]
 RUNS_TABLE = TABLE.rsplit(".", 1)[0] + ".`agent_runs`"
 GLOSSARY_TABLE = TABLE.rsplit(".", 1)[0] + ".`glossary`"
 OWNERS_TABLE = TABLE.rsplit(".", 1)[0] + ".`owners`"
@@ -139,6 +144,11 @@ def cached(key: str, fn, refresh: bool = False):
     return value
 
 
+def forget(key: str) -> None:
+    with _lock:
+        _cache.pop(key, None)
+
+
 app = FastAPI(title="STTM viewer")
 
 
@@ -183,41 +193,54 @@ def facets(refresh: bool = False) -> dict:
     return cached("facets", load, refresh)
 
 
-@app.get("/api/sttm")
-def sttm(table: list[str] = Query(None), layer: list[str] = Query(None), owner: list[str] = Query(None),
-         definition_source: list[str] = Query(None), kind: list[str] = Query(None), origin: list[str] = Query(None),
-         data_type: list[str] = Query(None), run: list[str] = Query(None), issue: list[str] = Query(None),
-         q: str | None = None, depends_on: str | None = None, refresh: bool = False) -> dict:
-    """Filtered STTM rows. All values are bound as parameters."""
-    given = {"table": table, "layer": layer, "owner": owner, "definition_source": definition_source, "kind": kind,
-             "origin": origin, "data_type": data_type, "run": run}
+def filters_of(request: Request) -> dict:
+    """The filters in the query string, as {name: [values]} (q and depends_on: a string)."""
+    qp = request.query_params
+    out: dict = {k: qp.getlist(k) for k in (*EQ_FILTERS, "issue") if qp.getlist(k)}
+    for k in ("q", "depends_on"):
+        if (qp.get(k) or "").strip():
+            out[k] = qp[k].strip()
+    return out
+
+
+def filtered_rows(f: dict, refresh: bool = False) -> list[dict]:
+    """STTM rows for the filters. All values are bound as parameters."""
     where, params = ["true"], {}
-    for name, values in given.items():
-        if values:
+    for name in EQ_FILTERS:
+        if f.get(name):
             where.append(f"array_contains(from_json(:{name}, 'array<string>'), {EQ_FILTERS[name]})")
-            params[name] = json.dumps(values)
-    if issue:
+            params[name] = json.dumps(f[name])
+    if f.get("issue"):
         # 'OPEN' = any issue except INFO, 'NONE' = no issue at all, otherwise an issue type
         conds = ["arrays_overlap(split(issue_types, '; '), from_json(:issue, 'array<string>'))"]
-        if "OPEN" in issue:
+        if "OPEN" in f["issue"]:
             conds.append("has_open_issue")
-        if "NONE" in issue:
+        if "NONE" in f["issue"]:
             conds.append("issue_types = ''")
         where.append("(" + " OR ".join(conds) + ")")
-        params["issue"] = json.dumps(issue)
-    if q:
+        params["issue"] = json.dumps(f["issue"])
+    if f.get("q"):
         where.append("""lower(concat_ws(' ', target_table, target_column, business_definition, transformation,
                          source_columns, proposed_definition)) LIKE concat('%', lower(:q), '%')""")
-        params["q"] = q.strip()
-    if depends_on:
+        params["q"] = f["q"]
+    if f.get("depends_on"):
         # a column (silver.orders.is_cancelled) or a table (bronze.orders_raw): everything downstream of it
         where.append("""exists(split(upstream_columns, '; '), c -> c = :dep OR startswith(c, concat(:dep, '.')))""")
-        params["dep"] = depends_on.strip()
+        params["dep"] = f["depends_on"]
     sql = f"""SELECT * FROM {TABLE} WHERE {' AND '.join(where)}
               ORDER BY CASE layer WHEN 'bronze' THEN 1 WHEN 'silver' THEN 2 ELSE 3 END, target_table, target_column"""
     key = "rows:" + json.dumps(params, sort_keys=True)
-    return {"rows": cached(key, lambda: run_sql(sql, params), refresh)}
+    return cached(key, lambda: run_sql(sql, params), refresh)
 
+
+@app.get("/api/sttm")
+def sttm(request: Request, table: list[str] = Query(None), layer: list[str] = Query(None),
+         owner: list[str] = Query(None), definition_source: list[str] = Query(None), kind: list[str] = Query(None),
+         origin: list[str] = Query(None), data_type: list[str] = Query(None), run: list[str] = Query(None),
+         issue: list[str] = Query(None), q: str | None = None, depends_on: str | None = None,
+         refresh: bool = False) -> dict:
+    """Filtered STTM rows (several values per filter: OR within a filter, AND across filters)."""
+    return {"rows": filtered_rows(filters_of(request), refresh)}
 
 
 # ---------------------------------------------------------------------------------------------------- stewardship
@@ -311,6 +334,7 @@ def decide(d: Decision, request: Request) -> dict:
                  VALUES (:k, :d, :h, :n, current_user(), current_timestamp())""",
                 {"k": d.column, "d": text, "h": cur[0]["lineage_hash"], "n": note}, client=client)
     glossary(refresh=True)
+    forget("history")
     return {"ok": True, "column": d.column, "action": d.action}
 
 
@@ -368,7 +392,32 @@ def set_issue_status(d: IssueStatus, request: Request) -> dict:
             {"k": d.column, "t": d.issue_type, "f": d.fingerprint, "st": d.status, "a": assignee, "c": comment},
             client=user_client(request))
     load_issues(refresh=True)
+    forget("history")
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------------------------------- history
+
+history = History(lambda sql, params=None: run_sql(sql, params), META_SCHEMA, PREFIX)
+
+
+@app.get("/api/history")
+def get_history(refresh: bool = False) -> dict:
+    """Agent runs with the columns each one changed (before/after, from the STTM change data feed), steward decisions
+    (glossary CDF) and issue status changes (issue_status CDF). Read as the app's service principal."""
+    return cached("history", history.load, refresh)
+
+
+@app.get("/api/export.xlsx")
+def export_xlsx(request: Request, refresh: bool = False) -> Response:
+    """'Download for audit': the rows for the current filters, open issues and recent history as an Excel file."""
+    f = filters_of(request)
+    data = audit.build(rows=filtered_rows(f, refresh), issues=load_issues(refresh), hist=get_history(refresh),
+                       user=whoami(request)["user"], source_table=TABLE.replace("`", ""), filters=f,
+                       history_days=AUDIT_HISTORY_DAYS)
+    name = f"sttm_audit_{time.strftime('%Y%m%d_%H%M', time.gmtime())}.xlsx"
+    return Response(data, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"content-disposition": f'attachment; filename="{name}"', "cache-control": "no-store"})
 
 
 # ---------------------------------------------------------------------------------------------------- agent runs

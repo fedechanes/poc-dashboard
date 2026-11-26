@@ -29,7 +29,7 @@ from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 from . import sqlparse
-from .config import (CATALOG, DEFAULT_OWNER, GLOSSARY_FILE, LANDING_PATH, LAYERS, LLM_ENDPOINT, META, OUTPUT_DIR, PIPELINE_CONF,
+from .config import (CATALOG, DEFAULT_OWNER, GLOSSARY_FILE, HISTORY_RETENTION_DAYS, LANDING_PATH, LAYERS, LLM_ENDPOINT, META, OUTPUT_DIR, PIPELINE_CONF,
                      SCHEMAS, layer_of_schema, load_state, run_sql, sql_str)
 from .sqlparse import FILE_SOURCE, sha
 
@@ -139,8 +139,26 @@ COMMENT 'STTM agent watermarks'""")
   comments_written INT, tags_written INT, open_issues INT, uc_edges_new BIGINT, lineage_watermark STRING,
   sttm_version BIGINT, details STRING)
 COMMENT 'One row per STTM agent run'""")
+    keep_history(w)
     seed_glossary(w)
     seed_owners(w)
+
+
+HISTORY_TABLES = ("sttm", "glossary", "issue_status", "issues")   # the viewer's History reads their change data feed
+
+
+def keep_history(w: WorkspaceClient) -> None:
+    """Keep the change data feed of the history tables readable for STTM_HISTORY_RETENTION_DAYS. VACUUM (run by
+    predictive optimization on managed tables) deletes change files older than delta.deletedFileRetentionDuration
+    (default 7 days), and table_changes() needs the log too (delta.logRetentionDuration, default 30 days)."""
+    days = f"interval {HISTORY_RETENTION_DAYS} days"
+    for t in HISTORY_TABLES:
+        props = {r["key"]: r["value"] for r in run_sql(w, f"SHOW TBLPROPERTIES {META}.{t}")}
+        want = {"delta.deletedFileRetentionDuration": days,
+                "delta.logRetentionDuration": f"interval {max(HISTORY_RETENTION_DAYS, 30)} days"}
+        if any(props.get(k) != v for k, v in want.items()):
+            run_sql(w, f"ALTER TABLE {META}.{t} SET TBLPROPERTIES ("
+                       + ", ".join(f"'{k}' = '{v}'" for k, v in want.items()) + ")")
 
 
 def get_state(w: WorkspaceClient, k: str) -> str | None:
@@ -706,6 +724,7 @@ def build(w: WorkspaceClient, log: Log, full: bool = False, dry_run: bool = Fals
              "uc": str(uc_new), "wm": summary["lineage_watermark"], "ver": str(v_after),
              "details": json.dumps({"reasons": {short(k): v for k, v in reasons.items()},
                                     "requested_by": os.getenv("STTM_REQUESTED_BY") or None,
+                                    "sttm_version_before": v_before,
                                     "issues_new": summary["issues_new"], "issues_closed": summary["issues_closed"],
                                     "new_issues": summary["new_issue_keys"]})})
     return summary
